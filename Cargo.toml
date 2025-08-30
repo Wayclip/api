@@ -1,11 +1,15 @@
 [package]
 name = "wayclip_api"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [[bin]]
 name = "wayclip_api"
 path = "src/main.rs"
+
+[package.metadata.sqlx]
+database = "postgres"
+data-source = "DATABASE_URL"
 
 [dependencies]
 actix-web = "4"

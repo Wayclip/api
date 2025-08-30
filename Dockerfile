@@ -1,7 +1,6 @@
-FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
+FROM --platform=$BUILDFORM rust:1-bookworm AS builder
 
 ARG TARGETPLATFORM
-
 RUN apt-get update && \
     export DEBIAN_FRONTEND=noninteractive && \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
@@ -27,29 +26,26 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN rustup target add aarch64-unknown-linux-gnu
-
 WORKDIR /usr/src/app
-
 RUN mkdir -p .cargo && \
     echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml && \
     echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
-
 RUN cargo install sqlx-cli --no-default-features --features postgres
 
-COPY api.Cargo.toml ./Cargo.toml
-COPY Cargo.lock ./
-COPY wayclip_api/Cargo.toml ./wayclip_api/
-COPY wayclip_core/Cargo.toml ./wayclip_core/
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo fetch
 
-COPY . .
+COPY .sqlx ./.sqlx
+
+COPY src ./src
 
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         export CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc" && \
         export PKG_CONFIG="aarch64-linux-gnu-pkg-config" && \
-        cargo build --release --package wayclip_api --target aarch64-unknown-linux-gnu; \
+        cargo build --release --target aarch64-unknown-linux-gnu; \
     else \
-        cargo build --release --package wayclip_api; \
+        cargo build --release; \
     fi
 
 RUN mkdir /out && \
