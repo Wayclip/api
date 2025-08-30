@@ -56,7 +56,7 @@ RUN mkdir /out && \
     else \
         cp /usr/src/app/target/release/wayclip_api /out/; \
     fi && \
-    cp /usr/src/app/.cargo/bin/sqlx /out/
+    cp /usr/local/cargo/bin/sqlx /out/
 
 FROM debian:bookworm-slim
 
