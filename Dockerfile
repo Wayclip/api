@@ -39,6 +39,8 @@ RUN cargo fetch
 COPY .sqlx ./.sqlx
 
 COPY src ./src
+COPY assets ./assets
+COPY migrations ./migrations
 
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         export CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc" && \
