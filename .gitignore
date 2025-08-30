@@ -23,7 +23,6 @@ Thumbs.db
 **/*.rs.bk
 
 # Cargo
-Cargo.lock
 .cargo-ok
 
 # ======================
