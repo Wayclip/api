@@ -1,4 +1,4 @@
-FROM --platform=$BUILDFORM rust:1-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 
 ARG TARGETPLATFORM
 RUN apt-get update && \
