@@ -1,12 +1,12 @@
 use crate::jwt;
 use actix_web::{
+    body::BoxBody,
+    dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpMessage, HttpResponse,
-    dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 };
 use futures_util::future::LocalBoxFuture;
-use std::future::{Ready, ready};
-
-use actix_web::body::BoxBody;
+use std::future::{ready, Ready};
+use wayclip_core::log;
 
 pub struct Auth;
 
@@ -42,6 +42,7 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
+        log!([DEBUG] => "Auth middleware processing request for URI: {}", req.uri());
         let token = req
             .headers()
             .get("Authorization")
@@ -49,23 +50,33 @@ where
             .and_then(|s| s.strip_prefix("Bearer "));
 
         match token {
-            Some(token) => match jwt::validate_jwt(token) {
-                Ok(claims) => {
-                    req.extensions_mut().insert(claims.sub);
-                    let fut = self.service.call(req);
-                    Box::pin(fut)
+            Some(token) => {
+                log!([DEBUG] => "Found Bearer token in Authorization header.");
+                match jwt::validate_jwt(token) {
+                    Ok(claims) => {
+                        log!([AUTH] => "Token validation successful for user ID: {}", claims.sub);
+                        req.extensions_mut().insert(claims.sub);
+                        let fut = self.service.call(req);
+                        Box::pin(fut)
+                    }
+                    Err(e) => {
+                        log!([AUTH] => "Token validation failed: {:?}", e);
+                        Box::pin(async move {
+                            Ok(req
+                                .into_response(HttpResponse::Unauthorized().finish())
+                                .map_into_boxed_body())
+                        })
+                    }
                 }
-                Err(_) => Box::pin(async move {
+            }
+            None => {
+                log!([AUTH] => "No Authorization header or Bearer token found.");
+                Box::pin(async move {
                     Ok(req
                         .into_response(HttpResponse::Unauthorized().finish())
                         .map_into_boxed_body())
-                }),
-            },
-            None => Box::pin(async move {
-                Ok(req
-                    .into_response(HttpResponse::Unauthorized().finish())
-                    .map_into_boxed_body())
-            }),
+                })
+            }
         }
     }
 }

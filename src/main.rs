@@ -1,10 +1,10 @@
 use crate::settings::Settings;
 use crate::storage::{LocalStorage, SftpStorage, Storage};
 use actix_extensible_rate_limit::{
+    backend::{memory::InMemoryBackend, SimpleInputFunctionBuilder},
     RateLimiter,
-    backend::{SimpleInputFunctionBuilder, memory::InMemoryBackend},
 };
-use actix_web::{App, HttpServer, web};
+use actix_web::{web, App, HttpServer};
 use dotenvy::dotenv;
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenUrl};
@@ -15,6 +15,7 @@ use std::fs as std_fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_actix_web::TracingLogger;
+use wayclip_core::log;
 use wayclip_core::models::SubscriptionTier;
 
 mod auth_handler;
@@ -40,13 +41,18 @@ async fn main() -> std::io::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    log!([DEBUG] => "Logger initialized. Starting up Wayclip API...");
+
     let config = Settings::new().expect("Failed to load configuration");
+    log!([DEBUG] => "Configuration loaded successfully.");
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redirect_uri = env::var("REDIRECT_URL").expect("REDIRECT_URL must be set");
+
     let pool = db::create_pool(&database_url)
         .await
         .expect("Failed to create database pool.");
+    log!([DEBUG] => "Database pool created successfully.");
 
     let github_client_id =
         ClientId::new(env::var("GITHUB_CLIENT_ID").expect("Missing GITHUB_CLIENT_ID"));
@@ -57,6 +63,8 @@ async fn main() -> std::io::Result<()> {
         TokenUrl::new("https://github.com/login/oauth/access_token".to_string()).unwrap();
     let redirect_url =
         RedirectUrl::new(format!("{}/auth/callback", redirect_uri).to_string()).unwrap();
+
+    log!([AUTH] => "OAuth2 configured with Redirect URL: {redirect_url:?}");
 
     let client = BasicClient::new(
         github_client_id,
@@ -71,6 +79,7 @@ async fn main() -> std::io::Result<()> {
         "SFTP" => Arc::new(SftpStorage::new(&config)),
         _ => panic!("Invalid STORAGE_TYPE specified"),
     };
+    log!([DEBUG] => "Storage backend initialized: {}", config.storage_type);
 
     if config.storage_type == "LOCAL" {
         let local_path = config
@@ -81,6 +90,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     let tier_limits = Arc::new(config.get_tier_limits());
+    log!([DEBUG] => "Tier limits loaded.");
 
     let app_state = AppState {
         db_pool: pool,
@@ -91,6 +101,8 @@ async fn main() -> std::io::Result<()> {
 
     let app_settings = web::Data::new(config.clone());
     let backend = InMemoryBackend::builder().build();
+
+    log!([DEBUG] => "Starting Actix web server on 0.0.0.0:8080...");
 
     HttpServer::new(move || {
         let input = SimpleInputFunctionBuilder::new(Duration::from_secs(3600), 20)

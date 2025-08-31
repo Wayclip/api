@@ -7,6 +7,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
+use wayclip_core::log;
 
 #[async_trait]
 pub trait Storage: Send + Sync {
@@ -33,6 +34,7 @@ impl LocalStorage {
 #[async_trait]
 impl Storage for LocalStorage {
     async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String> {
+        log!([DEBUG] => "LOCAL: Uploading file '{}'", file_name);
         if !self.storage_path.exists() {
             fs::create_dir_all(&self.storage_path).await?;
         }
@@ -43,15 +45,20 @@ impl Storage for LocalStorage {
             .unwrap_or("mp4");
         let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
         let dest_path = self.storage_path.join(&unique_filename);
+        log!([DEBUG] => "LOCAL: Writing file to '{}'", dest_path.display());
 
-        fs::write(dest_path, data).await?;
+        fs::write(&dest_path, data).await?;
 
         Ok(unique_filename)
     }
     async fn delete(&self, storage_path: &str) -> Result<()> {
+        log!([CLEANUP] => "LOCAL: Deleting file '{}'", storage_path);
         let file_path = self.storage_path.join(storage_path);
         if file_path.exists() {
-            fs::remove_file(file_path).await?;
+            fs::remove_file(&file_path).await?;
+            log!([DEBUG] => "LOCAL: Successfully deleted '{}'", file_path.display());
+        } else {
+            log!([DEBUG] => "LOCAL: File '{}' not found, skipping deletion.", file_path.display());
         }
         Ok(())
     }
@@ -88,6 +95,7 @@ impl SftpStorage {
 #[async_trait]
 impl Storage for SftpStorage {
     async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String> {
+        log!([DEBUG] => "SFTP: Uploading file '{}' to {}", file_name, self.host);
         let host = self.host.clone();
         let port = self.port;
         let user = self.user.clone();
@@ -97,6 +105,7 @@ impl Storage for SftpStorage {
         let owned_file_name = file_name.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<String> {
+            log!([DEBUG] => "SFTP (blocking): Connecting to {}:{}", host, port);
             let tcp = TcpStream::connect(format!("{host}:{port}"))?;
             let mut sess = Session::new()?;
             sess.set_tcp_stream(tcp);
@@ -107,6 +116,7 @@ impl Storage for SftpStorage {
             } else {
                 panic!("SFTP password authentication is required for this example");
             }
+            log!([DEBUG] => "SFTP (blocking): Authentication successful.");
 
             let sftp = sess.sftp()?;
 
@@ -116,9 +126,11 @@ impl Storage for SftpStorage {
                 .unwrap_or("");
             let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
             let remote_file_path = Path::new(&remote_path_str).join(&unique_filename);
+            log!([DEBUG] => "SFTP (blocking): Writing to remote path: {}", remote_file_path.display());
 
             let mut remote_file = sftp.create(remote_file_path.as_path())?;
             remote_file.write_all(&data)?;
+            log!([DEBUG] => "SFTP: Upload successful.");
 
             let public_url = format!("{public_url_base}/{unique_filename}");
             Ok(public_url)
@@ -127,6 +139,7 @@ impl Storage for SftpStorage {
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
+        log!([CLEANUP] => "SFTP: Deleting file from URL '{}'", storage_path);
         let file_name = Path::new(storage_path)
             .file_name()
             .and_then(|s| s.to_str())
@@ -140,6 +153,7 @@ impl Storage for SftpStorage {
         let file_name_owned = file_name.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
+            log!([DEBUG] => "SFTP (blocking): Connecting to {}:{}", host, port);
             let tcp = TcpStream::connect(format!("{}:{}", host, port))?;
             let mut sess = Session::new()?;
             sess.set_tcp_stream(tcp);
@@ -150,10 +164,13 @@ impl Storage for SftpStorage {
             } else {
                 panic!("SFTP password authentication required");
             }
+            log!([DEBUG] => "SFTP (blocking): Authentication successful.");
 
             let sftp = sess.sftp()?;
             let remote_file_path = Path::new(&remote_path_str).join(&file_name_owned);
+            log!([DEBUG] => "SFTP (blocking): Unlinking remote file: {}", remote_file_path.display());
             sftp.unlink(&remote_file_path)?;
+            log!([CLEANUP] => "SFTP: Deletion successful.");
             Ok(())
         })
         .await??;

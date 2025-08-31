@@ -1,14 +1,14 @@
-use crate::{AppState, jwt};
+use crate::{jwt, AppState};
 use actix_web::{
-    HttpMessage, HttpRequest, HttpResponse, Responder,
     cookie::{Cookie, SameSite},
     get,
     http::header::LOCATION,
-    web,
+    web, HttpMessage, HttpRequest, HttpResponse, Responder,
 };
 use oauth2::reqwest::async_http_client;
-use oauth2::{AuthorizationCode, CsrfToken, RedirectUrl, Scope, TokenResponse};
+use oauth2::{AuthorizationCode, CsrfToken, Scope, TokenResponse};
 use uuid::Uuid;
+use wayclip_core::log;
 use wayclip_core::models::{GitHubUser, User, UserProfile};
 
 #[derive(serde::Deserialize)]
@@ -29,6 +29,8 @@ async fn github_login(
         .clone()
         .unwrap_or_else(|| "http://localhost:1420".to_string());
 
+    log!([AUTH] => "GitHub login initiated for client: '{}' with final redirect: '{}'", client_type, final_redirect_str);
+
     let csrf_token = CsrfToken::new_random();
 
     let state_with_client = format!(
@@ -38,6 +40,7 @@ async fn github_login(
         final_redirect_str
     );
     let csrf_state = CsrfToken::new(state_with_client);
+    log!([DEBUG] => "Generated CSRF state for auth flow.");
 
     let (authorize_url, _csrf_state) = data
         .oauth_client
@@ -46,6 +49,7 @@ async fn github_login(
         .add_scope(Scope::new("read:user".to_string()))
         .url();
 
+    log!([AUTH] => "Redirecting user to GitHub authorize URL.");
     HttpResponse::Found()
         .append_header((LOCATION, authorize_url.to_string()))
         .finish()
@@ -62,32 +66,41 @@ async fn github_callback(
     query: web::Query<AuthRequest>,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    log!([AUTH] => "GitHub callback received. Code: '{}', State: '{}'", query.code, query.state);
     let state_parts: Vec<&str> = query.state.splitn(3, ':').collect();
 
     if state_parts.len() != 3 {
+        log!([AUTH] => "ERROR: Invalid state format received. Parts count: {}", state_parts.len());
         return HttpResponse::BadRequest().body("Invalid state format.");
     }
 
     let client_type = state_parts[1];
-    let redirect_url_str = state_parts[2];
+    let final_redirect_str = state_parts[2];
+    log!([AUTH] => "Parsed state. Client type: '{}', Final redirect: '{}'", client_type, final_redirect_str);
 
     let code = AuthorizationCode::new(query.code.clone());
-    let redirect_url = RedirectUrl::new(redirect_url_str.to_string()).unwrap();
 
+    log!([DEBUG] => "Attempting to exchange authorization code for access token...");
     let token_res = data
         .oauth_client
         .clone()
-        .set_redirect_uri(redirect_url)
         .exchange_code(code)
         .request_async(async_http_client)
         .await;
 
     let access_token = match token_res {
-        Ok(token) => token.access_token().secret().to_string(),
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Error: {e}")),
+        Ok(token) => {
+            log!([AUTH] => "Successfully exchanged code for access token.");
+            token.access_token().secret().to_string()
+        }
+        Err(e) => {
+            log!([AUTH] => "ERROR: Failed to exchange code for token: {:?}", e);
+            return HttpResponse::InternalServerError().body(format!("Error: {e}"));
+        }
     };
 
     let client = reqwest::Client::new();
+    log!([DEBUG] => "Fetching user profile from GitHub...");
     let github_user: GitHubUser = match client
         .get("https://api.github.com/user")
         .header("User-Agent", "wayclip-api")
@@ -95,15 +108,23 @@ async fn github_callback(
         .send()
         .await
     {
-        Ok(res) => match res.json().await {
-            Ok(user) => user,
-            Err(_) => {
+        Ok(res) => match res.json::<GitHubUser>().await {
+            Ok(user) => {
+                log!([AUTH] => "Successfully fetched GitHub user: {}", user.login);
+                user
+            }
+            Err(e) => {
+                log!([AUTH] => "ERROR: Failed to parse GitHub user JSON: {:?}", e);
                 return HttpResponse::InternalServerError().body("Failed to parse GitHub user");
             }
         },
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to fetch GitHub user"),
+        Err(e) => {
+            log!([AUTH] => "ERROR: Failed to fetch GitHub user: {:?}", e);
+            return HttpResponse::InternalServerError().body("Failed to fetch GitHub user");
+        }
     };
 
+    log!([DEBUG] => "Upserting user into database...");
     let user = match sqlx::query_as::<_, User>(
         "INSERT INTO users (github_id, username, avatar_url) VALUES ($1, $2, $3)
          ON CONFLICT (github_id) DO UPDATE SET username = $2, avatar_url = $3
@@ -115,26 +136,42 @@ async fn github_callback(
     .fetch_one(&data.db_pool)
     .await
     {
-        Ok(user) => user,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Database error: {e}")),
+        Ok(user) => {
+            log!([AUTH] => "Successfully upserted user. DB ID: {}", user.id);
+            user
+        }
+        Err(e) => {
+            log!([AUTH] => "ERROR: Database upsert failed: {:?}", e);
+            return HttpResponse::InternalServerError().body(format!("Database error: {e}"));
+        }
     };
 
+    log!([DEBUG] => "Creating JWT for user...");
     let jwt = match jwt::create_jwt(user.id) {
-        Ok(token) => token,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+        Ok(token) => {
+            log!([AUTH] => "Successfully created JWT.");
+            token
+        }
+        Err(e) => {
+            log!([AUTH] => "ERROR: Failed to create JWT: {:?}", e);
+            return HttpResponse::InternalServerError().body("Failed to create token");
+        }
     };
 
     if client_type == "cli" {
-        let deep_link = format!("{redirect_url_str}?token={jwt}");
+        let deep_link = format!("{final_redirect_str}?token={jwt}");
+        log!([AUTH] => "Redirecting CLI client to: {}", deep_link);
         HttpResponse::Found()
             .append_header((LOCATION, deep_link))
             .finish()
     } else if client_type == "tauri" {
         let deep_link = format!("wayclip://auth/callback?token={jwt}");
+        log!([AUTH] => "Redirecting Tauri client to: {}", deep_link);
         HttpResponse::Found()
             .append_header((LOCATION, deep_link))
             .finish()
     } else {
+        log!([AUTH] => "Redirecting web client and setting cookie.");
         let mut response = HttpResponse::Found();
         response.append_header((LOCATION, "http://localhost:1420"));
         response.cookie(
@@ -150,8 +187,10 @@ async fn github_callback(
 }
 
 #[get("/me")]
-pub async fn get_me(req: HttpRequest) -> impl Responder {
+pub async fn get_me(req: HttpRequest) -> HttpResponse {
+    log!([AUTH] => "/me endpoint called.");
     if let Some(user_id) = req.extensions().get::<Uuid>() {
+        log!([DEBUG] => "Authenticated user ID from token: {}", user_id);
         let data: &web::Data<AppState> = req.app_data().unwrap();
 
         let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
@@ -160,7 +199,10 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
             .await
         {
             Ok(user) => user,
-            Err(_) => return HttpResponse::NotFound().body("User not found"),
+            Err(_) => {
+                log!([AUTH] => "User ID {} from token not found in database.", user_id);
+                return HttpResponse::NotFound().body("User not found");
+            }
         };
 
         let stats = match sqlx::query!(
@@ -181,9 +223,10 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
             storage_limit,
             clip_count: stats.clip_count.unwrap_or(0),
         };
-
+        log!([AUTH] => "Successfully fetched profile for user '{}'.", user_profile.user.username);
         HttpResponse::Ok().json(user_profile)
     } else {
+        log!([AUTH] => "Unauthorized access to /me endpoint (no user ID in request extensions).");
         HttpResponse::Unauthorized().finish()
     }
 }

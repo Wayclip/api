@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use wayclip_core::log;
 use wayclip_core::models::SubscriptionTier;
 
 #[derive(Deserialize, Clone)]
@@ -23,6 +24,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn new() -> Result<Self, config::ConfigError> {
+        log!([DEBUG] => "Loading settings from environment variables...");
         let settings = config::Config::builder()
             .add_source(config::Environment::default())
             .build()?;
@@ -30,6 +32,7 @@ impl Settings {
     }
 
     pub fn get_tier_limits(&self) -> HashMap<SubscriptionTier, i64> {
+        log!([DEBUG] => "Parsing tier storage limits...");
         let mut map = HashMap::new();
         map.insert(
             SubscriptionTier::Free,

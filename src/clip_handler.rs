@@ -1,11 +1,14 @@
-use crate::{AppState, settings::Settings};
+use crate::{settings::Settings, AppState};
 use actix_files::NamedFile;
 use actix_multipart::Multipart;
-use actix_web::http::header::ContentType;
-use actix_web::{Error, HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, post, web};
+use actix_web::{
+    delete, get, http::header::ContentType, post, web, Error, HttpMessage, HttpRequest,
+    HttpResponse, Responder,
+};
 use futures_util::stream::StreamExt;
 use std::path::PathBuf;
 use uuid::Uuid;
+use wayclip_core::log;
 use wayclip_core::models::{Clip, HostedClipInfo, User};
 
 const MAX_FILE_SIZE: usize = 1_073_741_824;
@@ -17,11 +20,13 @@ pub async fn share_clip(
     data: web::Data<AppState>,
     settings: web::Data<Settings>,
 ) -> Result<HttpResponse, Error> {
+    log!([DEBUG] => "Received clip share request.");
     let user_id = req
         .extensions()
         .get::<Uuid>()
         .cloned()
         .ok_or_else(|| actix_web::error::ErrorUnauthorized("Not authenticated"))?;
+    log!([DEBUG] => "Share request authenticated for user ID: {}", user_id);
 
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(user_id)
@@ -30,6 +35,7 @@ pub async fn share_clip(
         .map_err(|_| actix_web::error::ErrorNotFound("User not found"))?;
 
     if user.is_banned {
+        log!([DEBUG] => "User '{}' is banned. Rejecting share.", user.username);
         return Err(actix_web::error::ErrorForbidden(
             "This account is suspended.",
         ));
@@ -42,6 +48,7 @@ pub async fn share_clip(
             .fetch_one(&data.db_pool)
             .await
             .unwrap_or(0);
+    log!([DEBUG] => "User '{}' storage usage: {} / {}", user.username, current_usage, tier_limit);
 
     if let Some(item) = payload.next().await {
         let mut field = item?;
@@ -50,6 +57,7 @@ pub async fn share_clip(
             .and_then(|cd| cd.get_filename())
             .unwrap_or("clip.mp4")
             .to_string();
+        log!([DEBUG] => "Processing uploaded file: '{}'", filename);
 
         let mut file_data = Vec::new();
         while let Some(chunk) = field.next().await {
@@ -63,21 +71,26 @@ pub async fn share_clip(
         }
 
         let file_size = file_data.len() as i64;
+        log!([DEBUG] => "File size is {} bytes.", file_size);
         if current_usage + file_size > tier_limit {
+            log!([DEBUG] => "Storage limit exceeded for user '{}'. Rejecting upload.", user.username);
             return Err(actix_web::error::ErrorForbidden(
                 "Storage limit exceeded for your subscription tier.",
             ));
         }
 
+        log!([DEBUG] => "Uploading file to storage backend...");
         let storage_path = data
             .storage
             .upload(&filename, file_data)
             .await
             .map_err(|e| {
-                tracing::error!("Storage upload failed: {:?}", e);
+                log!([DEBUG] => "ERROR: Storage upload failed: {:?}", e);
                 actix_web::error::ErrorInternalServerError("Failed to upload file.")
             })?;
+        log!([DEBUG] => "File uploaded successfully. Storage path: '{}'", storage_path);
 
+        log!([DEBUG] => "Inserting clip metadata into database...");
         let new_clip: Clip = sqlx::query_as(
             "INSERT INTO clips (user_id, file_name, file_size, public_url) VALUES ($1, $2, $3, $4) RETURNING *",
         )
@@ -88,9 +101,10 @@ pub async fn share_clip(
         .fetch_one(&data.db_pool)
         .await
         .map_err(|e| {
-            tracing::error!("DB insert failed: {:?}", e);
+            log!([DEBUG] => "ERROR: DB insert failed: {:?}", e);
             actix_web::error::ErrorInternalServerError("Failed to save clip metadata.")
         })?;
+        log!([DEBUG] => "Clip metadata saved to DB. Clip ID: {}", new_clip.id);
 
         let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
         Ok(HttpResponse::Ok().json(serde_json::json!({ "url": response_url })))
@@ -106,6 +120,7 @@ pub async fn serve_clip(
     data: web::Data<AppState>,
     settings: web::Data<Settings>,
 ) -> impl Responder {
+    log!([DEBUG] => "Serving clip page for ID: {}", *id);
     let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
         .bind(*id)
         .fetch_one(&data.db_pool)
@@ -127,6 +142,7 @@ pub async fn serve_clip(
         .any(|bot| user_agent.contains(bot));
 
     if is_bot {
+        log!([DEBUG] => "Bot detected ('{}'), serving meta tags.", user_agent);
         let html = format!(
             r#"<!DOCTYPE html>
             <html lang="en">
@@ -154,6 +170,7 @@ pub async fn serve_clip(
             .content_type("text/html; charset=utf-8")
             .body(html)
     } else {
+        log!([DEBUG] => "Regular user detected, serving video player page.");
         let report_url = format!("/clip/{}/report", clip.id);
         let html = format!(
             r#"<!DOCTYPE html>
@@ -197,6 +214,7 @@ pub async fn serve_clip_raw(
     settings: web::Data<Settings>,
     req: HttpRequest,
 ) -> impl Responder {
+    log!([DEBUG] => "Serving raw clip file for ID: {}", *id);
     let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
         .bind(*id)
         .fetch_one(&data.db_pool)
@@ -207,6 +225,7 @@ pub async fn serve_clip_raw(
     };
 
     if settings.storage_type == "LOCAL" {
+        log!([DEBUG] => "Serving from LOCAL storage. Path: {}", clip.public_url);
         let storage_dir = settings
             .local_storage_path
             .clone()
@@ -218,6 +237,7 @@ pub async fn serve_clip_raw(
             Err(_) => HttpResponse::NotFound().finish(),
         }
     } else {
+        log!([DEBUG] => "Redirecting to remote storage URL: {}", clip.public_url);
         HttpResponse::Found()
             .append_header(("Location", clip.public_url.clone()))
             .finish()
@@ -231,6 +251,7 @@ pub async fn report_clip(
     data: web::Data<AppState>,
     settings: web::Data<Settings>,
 ) -> impl Responder {
+    log!([DEBUG] => "Received report for clip ID: {}", *id);
     let report_data = sqlx::query!(
         r#"
         SELECT c.id as clip_id, c.file_name, u.id as user_id, u.username
@@ -251,6 +272,7 @@ pub async fn report_clip(
                 .realip_remote_addr()
                 .unwrap_or("unknown")
                 .to_string();
+            log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
 
             let message = serde_json::json!({
                 "content": "🚨 New Clip Report!",
@@ -267,7 +289,7 @@ pub async fn report_clip(
 
             let client = reqwest::Client::new();
             if let Err(e) = client.post(url).json(&message).send().await {
-                tracing::error!("Failed to send Discord notification: {}", e);
+                log!([DEBUG] => "ERROR: Failed to send Discord notification: {}", e);
             }
         }
     }
@@ -281,6 +303,7 @@ pub async fn report_clip(
 #[get("/clips/index")]
 pub async fn get_clips_index(req: HttpRequest) -> impl Responder {
     if let Some(user_id) = req.extensions().get::<Uuid>() {
+        log!([DEBUG] => "Fetching clip index for user ID: {}", user_id);
         let data: &web::Data<AppState> = req.app_data().unwrap();
         match sqlx::query_as::<_, HostedClipInfo>(
             "SELECT id, file_name FROM clips WHERE user_id = $1",
@@ -289,8 +312,14 @@ pub async fn get_clips_index(req: HttpRequest) -> impl Responder {
         .fetch_all(&data.db_pool)
         .await
         {
-            Ok(clips) => HttpResponse::Ok().json(clips),
-            Err(_) => HttpResponse::InternalServerError().body("Could not fetch clips index"),
+            Ok(clips) => {
+                log!([DEBUG] => "Found {} clips for user.", clips.len());
+                HttpResponse::Ok().json(clips)
+            }
+            Err(e) => {
+                log!([DEBUG] => "ERROR: Could not fetch clips index: {}", e);
+                HttpResponse::InternalServerError().body("Could not fetch clips index")
+            }
         }
     } else {
         HttpResponse::Unauthorized().finish()
@@ -307,6 +336,7 @@ pub async fn delete_clip(
         Some(id) => *id,
         None => return HttpResponse::Unauthorized().finish(),
     };
+    log!([CLEANUP] => "Received delete request for clip {} from user {}", *id, user_id);
 
     let clip_to_delete =
         match sqlx::query!("SELECT user_id, public_url FROM clips WHERE id = $1", *id)
@@ -319,13 +349,16 @@ pub async fn delete_clip(
         };
 
     if clip_to_delete.user_id != user_id {
+        log!([CLEANUP] => "User {} attempted to delete clip belonging to {}", user_id, clip_to_delete.user_id);
         return HttpResponse::NotFound().finish();
     }
 
+    log!([CLEANUP] => "Deleting file from storage: {}", clip_to_delete.public_url);
     if let Err(e) = data.storage.delete(&clip_to_delete.public_url).await {
-        tracing::error!("Failed to delete file from storage: {:?}", e);
+        log!([CLEANUP] => "ERROR: Failed to delete file from storage: {:?}", e);
     }
 
+    log!([CLEANUP] => "Deleting clip {} from database.", *id);
     match sqlx::query!(
         "DELETE FROM clips WHERE id = $1 AND user_id = $2",
         *id,
@@ -334,9 +367,12 @@ pub async fn delete_clip(
     .execute(&data.db_pool)
     .await
     {
-        Ok(_) => HttpResponse::NoContent().finish(),
+        Ok(_) => {
+            log!([CLEANUP] => "Successfully deleted clip {}.", *id);
+            HttpResponse::NoContent().finish()
+        }
         Err(e) => {
-            tracing::error!("Failed to delete clip from database: {:?}", e);
+            log!([CLEANUP] => "ERROR: Failed to delete clip from database: {:?}", e);
             HttpResponse::InternalServerError().finish()
         }
     }

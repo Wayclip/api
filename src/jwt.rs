@@ -1,8 +1,9 @@
 use chrono::{Duration, Utc};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::env;
 use uuid::Uuid;
+use wayclip_core::log;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -12,6 +13,7 @@ pub struct Claims {
 }
 
 pub fn create_jwt(user_id: Uuid) -> Result<String, jsonwebtoken::errors::Error> {
+    log!([AUTH] => "Creating new JWT for user ID: {}", user_id);
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let now = Utc::now();
     let expiration = now + Duration::days(7);
@@ -30,6 +32,7 @@ pub fn create_jwt(user_id: Uuid) -> Result<String, jsonwebtoken::errors::Error> 
 }
 
 pub fn validate_jwt(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    log!([DEBUG] => "Attempting to validate JWT...");
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let decoding_key = DecodingKey::from_secret(secret.as_ref());
     let validation = Validation::default();
