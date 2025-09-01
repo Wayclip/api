@@ -114,18 +114,21 @@ impl Storage for SftpStorage {
             if let Some(pass) = password {
                 sess.userauth_password(&user, &pass)?;
             } else {
-                panic!("SFTP password authentication is required for this example");
+                panic!("SFTP password authentication is required");
             }
             log!([DEBUG] => "SFTP (blocking): Authentication successful.");
 
             let sftp = sess.sftp()?;
+            
+            let remote_dir = Path::new(&remote_path_str);
+            sftp.mkdir(remote_dir, 0o755).ok();
 
             let extension = Path::new(&owned_file_name)
                 .extension()
                 .and_then(|s| s.to_str())
-                .unwrap_or("");
+                .unwrap_or("mp4");
             let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
-            let remote_file_path = Path::new(&remote_path_str).join(&unique_filename);
+            let remote_file_path = remote_dir.join(&unique_filename);
             log!([DEBUG] => "SFTP (blocking): Writing to remote path: {}", remote_file_path.display());
 
             let mut remote_file = sftp.create(remote_file_path.as_path())?;
