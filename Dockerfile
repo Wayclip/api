@@ -30,7 +30,6 @@ WORKDIR /usr/src/app
 RUN mkdir -p .cargo && \
     echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml && \
     echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
-RUN cargo install sqlx-cli --no-default-features --features postgres
 
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
@@ -45,8 +44,10 @@ COPY migrations ./migrations
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         export CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc" && \
         export PKG_CONFIG="aarch64-linux-gnu-pkg-config" && \
+        cargo install sqlx-cli --no-default-features --features postgres --target aarch64-unknown-linux-gnu && \
         cargo build --release --target aarch64-unknown-linux-gnu; \
     else \
+        cargo install sqlx-cli --no-default-features --features postgres && \
         cargo build --release; \
     fi
 
