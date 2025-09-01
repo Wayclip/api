@@ -234,13 +234,26 @@ pub async fn serve_clip_raw(
 
         match NamedFile::open(file_path) {
             Ok(file) => file.into_response(&req),
-            Err(_) => HttpResponse::NotFound().finish(),
+            Err(e) => {
+                log!([DEBUG] => "ERROR: Failed to open local file: {:?}", e);
+                HttpResponse::NotFound().finish()
+            }
         }
     } else {
-        log!([DEBUG] => "Redirecting to remote storage URL: {}", clip.public_url);
-        HttpResponse::Found()
-            .append_header(("Location", clip.public_url.clone()))
-            .finish()
+        log!([DEBUG] => "Fetching from remote storage backend for path: {}", clip.public_url);
+
+        match data.storage.download(&clip.public_url).await {
+            Ok(file_bytes) => {
+                log!([DEBUG] => "Successfully downloaded {} bytes from remote storage. Serving to client.", file_bytes.len());
+                HttpResponse::Ok()
+                    .content_type("video/mp4")
+                    .body(file_bytes)
+            }
+            Err(e) => {
+                log!([DEBUG] => "ERROR: Failed to download file from remote storage: {:?}", e);
+                HttpResponse::InternalServerError().body("Failed to retrieve clip from storage.")
+            }
+        }
     }
 }
 
@@ -275,7 +288,7 @@ pub async fn report_clip(
             log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
 
             let message = serde_json::json!({
-                "content": "🚨 New Clip Report!",
+                "content": "🚨 New Clip Report! <@564472732071493633>",
                 "embeds": [{
                     "title": "Reported Clip Details",
                     "color": 15158332,
