@@ -68,7 +68,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-6 libxrandr2 libxtst6 libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p /usr/src/app
+
 COPY --from=builder /out/wayclip_api /usr/local/bin/
 COPY --from=builder /out/sqlx /usr/local/bin/
+COPY --from=builder /usr/src/app/migrations /usr/src/app/migrations
 
 ENTRYPOINT ["/usr/local/bin/wayclip_api"]
