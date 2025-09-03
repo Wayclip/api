@@ -1,13 +1,13 @@
+use crate::log;
 use crate::settings::Settings;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use ssh2::{Sftp, Session};
+use ssh2::{OpenFlags, OpenType, Session as Ssh2Session, Sftp};
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use tokio::task;
 use uuid::Uuid;
-use wayclip_core::log;
 
 #[async_trait]
 pub trait Storage: Send + Sync {
@@ -36,40 +36,53 @@ impl LocalStorage {
 impl Storage for LocalStorage {
     async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String> {
         log!([DEBUG] => "LOCAL: Uploading file '{}'", file_name);
-        if !self.storage_path.exists() {
-            fs::create_dir_all(&self.storage_path).await?;
-        }
+
+        fs::create_dir_all(&self.storage_path).await?;
 
         let extension = Path::new(file_name)
             .extension()
             .and_then(|s| s.to_str())
-            .unwrap_or("mp4");
+            .unwrap_or("bin");
         let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
-        let dest_path = self.storage_path.join(&unique_filename);
-        log!([DEBUG] => "LOCAL: Writing file to '{}'", dest_path.display());
 
-        fs::write(&dest_path, data).await?;
+        let file_path = self.storage_path.join(&unique_filename);
+        fs::write(&file_path, data).await?;
+        log!([DEBUG] => "LOCAL: File saved to '{}'", file_path.display());
 
         Ok(unique_filename)
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
         log!([CLEANUP] => "LOCAL: Deleting file '{}'", storage_path);
+
         let file_path = self.storage_path.join(storage_path);
-        if file_path.exists() {
-            fs::remove_file(&file_path).await?;
-            log!([DEBUG] => "LOCAL: Successfully deleted '{}'", file_path.display());
-        } else {
-            log!([DEBUG] => "LOCAL: File '{}' not found, skipping deletion.", file_path.display());
+
+        if !file_path.starts_with(&self.storage_path) {
+            return Err(anyhow!(
+                "Invalid storage path for deletion: {}",
+                storage_path
+            ));
         }
+
+        fs::remove_file(&file_path).await?;
+        log!([CLEANUP] => "LOCAL: Deletion successful.");
         Ok(())
     }
 
     async fn download(&self, storage_path: &str) -> Result<Vec<u8>> {
-        log!([DEBUG] => "LOCAL: Reading file '{}'", storage_path);
+        log!([DEBUG] => "LOCAL: Downloading file '{}'", storage_path);
+
         let file_path = self.storage_path.join(storage_path);
+
+        if !file_path.starts_with(&self.storage_path) {
+            return Err(anyhow!(
+                "Invalid storage path for download: {}",
+                storage_path
+            ));
+        }
+
         let data = fs::read(&file_path).await?;
-        log!([DEBUG] => "LOCAL: Successfully read {} bytes from '{}'", data.len(), file_path.display());
+        log!([DEBUG] => "LOCAL: Successfully read {} bytes.", data.len());
         Ok(data)
     }
 }
@@ -81,6 +94,7 @@ pub struct SftpStorage {
     password: Option<String>,
     remote_path: String,
     public_url: String,
+    server_public_key: Option<String>,
 }
 
 impl SftpStorage {
@@ -98,119 +112,144 @@ impl SftpStorage {
                 .sftp_public_url
                 .clone()
                 .expect("SFTP_PUBLIC_URL is required"),
+            server_public_key: settings.sftp_server_public_key.clone(),
         }
     }
 
-    fn get_sftp_client(&self) -> Result<Sftp> {
-        log!([DEBUG] => "SFTP (blocking): Connecting to {}:{}", self.host, self.port);
-        let tcp = TcpStream::connect(format!("{}:{}", self.host, self.port))?;
-        let mut sess = Session::new()?;
-        sess.set_tcp_stream(tcp);
-        sess.handshake()?;
+    async fn with_ssh2<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Ssh2Session) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let host = self.host.clone();
+        let port = self.port;
+        let user = self.user.clone();
+        let password = self.password.clone();
 
-        if let Some(pass) = self.password.as_deref() {
-            sess.userauth_password(&self.user, pass)?;
-        } else {
-            return Err(anyhow::anyhow!("SFTP password authentication is required"));
-        }
+        task::spawn_blocking(move || -> Result<T> {
+            let addr = format!("{}:{}", host, port);
+            let tcp = std::net::TcpStream::connect(addr)?;
+            let mut sess = Ssh2Session::new()?;
+            sess.set_blocking(true);
+            sess.set_tcp_stream(tcp);
+            sess.handshake()?;
+            if let Some(pw) = password {
+                sess.userauth_password(user.as_str(), &pw)?;
+            } else {
+                return Err(anyhow!("SFTP password authentication is required"));
+            }
 
-        log!([DEBUG] => "SFTP (blocking): Authentication successful.");
-        let sftp = sess.sftp()?;
-        Ok(sftp)
+            if !sess.authenticated() {
+                return Err(anyhow!("SFTP authentication failed."));
+            }
+
+            let result = f(&sess)?;
+            Ok(result)
+        })
+        .await?
     }
 
-    fn filename_from_storage_path<'a>(&self, storage_path: &'a str) -> Result<&'a str> {
-        Path::new(storage_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Could not parse filename from SFTP URL: {}", storage_path))
+    async fn get_sftp(&self) -> Result<Sftp> {
+        self.with_ssh2(|sess| {
+            let sftp = sess.sftp()?;
+            Ok(sftp)
+        })
+        .await
+    }
+
+    async fn upload_to_remote(&self, remote_path: &str, data: &[u8]) -> Result<()> {
+        let remote_path = remote_path.to_owned();
+        let data = data.to_owned();
+
+        self.with_ssh2(move |sess| {
+            let sftp = sess.sftp()?;
+            if let Some(parent) = Path::new(&remote_path).parent() {
+                let _ = sftp.mkdir(parent, 0o755);
+            }
+            let mut remote_file = sftp.open_mode(
+                Path::new(&remote_path),
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+                0o644,
+                OpenType::File,
+            )?;
+            remote_file.write_all(&data)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow!(e))
+    }
+
+    async fn download_from_remote(&self, remote_path: &str) -> Result<Vec<u8>> {
+        let remote_path = remote_path.to_owned();
+        self.with_ssh2(move |sess| {
+            let sftp = sess.sftp()?;
+            let mut remote_file = sftp.open(Path::new(&remote_path))?;
+            let mut buf = Vec::new();
+            remote_file.read_to_end(&mut buf)?;
+            Ok(buf)
+        })
+        .await
+        .map_err(|e| anyhow!(e))
+    }
+
+    async fn delete_remote_file(&self, remote_path: &str) -> Result<()> {
+        let remote_path = remote_path.to_owned();
+        self.with_ssh2(move |sess| {
+            let sftp = sess.sftp()?;
+            match sftp.unlink(Path::new(&remote_path)) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(anyhow!(e)),
+            }
+        })
+        .await
+        .map_err(|e| anyhow!(e))
     }
 }
 
 #[async_trait]
 impl Storage for SftpStorage {
     async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String> {
-        log!([DEBUG] => "SFTP: Uploading file '{}' to {}", file_name, self.host);
+        log!([DEBUG] => "SFTP (ssh2): Uploading file '{}'", file_name);
 
-        let me = self.clone();
-        let owned_file_name = file_name.to_string();
+        let remote_dir = self.remote_path.trim_end_matches('/');
+        let extension = Path::new(file_name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mp4");
+        let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
+        let remote_file_path = format!("{}/{}", remote_dir, unique_filename);
 
-        tokio::task::spawn_blocking(move || -> Result<String> {
-            let sftp = me.get_sftp_client()?;
-            let remote_dir = Path::new(&me.remote_path);
+        self.upload_to_remote(&remote_file_path, &data).await?;
 
-            sftp.mkdir(remote_dir, 0o755).ok();
-
-            let extension = Path::new(&owned_file_name)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("mp4");
-            let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
-            let remote_file_path = remote_dir.join(&unique_filename);
-
-            log!([DEBUG] => "SFTP (blocking): Writing to remote path: {}", remote_file_path.display());
-            let mut remote_file = sftp.create(remote_file_path.as_path())?;
-            remote_file.write_all(&data)?;
-            log!([DEBUG] => "SFTP: Upload successful.");
-
-            let public_url = format!("{}/{}", me.public_url, unique_filename);
-            Ok(public_url)
-        })
-        .await?
+        let public_url = format!("{}/{}", self.public_url, unique_filename);
+        Ok(public_url)
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
-        log!([CLEANUP] => "SFTP: Deleting file from URL '{}'", storage_path);
-        let file_name = self.filename_from_storage_path(storage_path)?;
+        log!([CLEANUP] => "SFTP (ssh2): Deleting file from URL '{}'", storage_path);
+        let file_name = Path::new(storage_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("Invalid storage_path for deletion: {}", storage_path))?;
+        let remote_dir = self.remote_path.trim_end_matches('/');
+        let remote_file_path = format!("{}/{}", remote_dir, file_name);
 
-        let me = self.clone();
-        let file_name_owned = file_name.to_string();
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let sftp = me.get_sftp_client()?;
-            let remote_file_path = Path::new(&me.remote_path).join(&file_name_owned);
-            log!([DEBUG] => "SFTP (blocking): Unlinking remote file: {}", remote_file_path.display());
-            sftp.unlink(&remote_file_path)?;
-            Ok(())
-        })
-        .await??;
-        log!([CLEANUP] => "SFTP: Deletion successful.");
+        self.delete_remote_file(&remote_file_path).await?;
+        log!([CLEANUP] => "SFTP (ssh2): Deletion successful.");
         Ok(())
     }
 
     async fn download(&self, storage_path: &str) -> Result<Vec<u8>> {
-        log!([DEBUG] => "SFTP: Downloading file from URL '{}'", storage_path);
-        let file_name = self.filename_from_storage_path(storage_path)?;
+        log!([DEBUG] => "SFTP (ssh2): Downloading file from URL '{}'", storage_path);
+        let file_name = Path::new(storage_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("Invalid storage_path for download: {}", storage_path))?;
+        let remote_dir = self.remote_path.trim_end_matches('/');
+        let remote_file_path = format!("{}/{}", remote_dir, file_name);
 
-        let me = self.clone();
-        let file_name_owned = file_name.to_string();
-
-        tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-            let sftp = me.get_sftp_client()?;
-            let remote_file_path = Path::new(&me.remote_path).join(&file_name_owned);
-
-            log!([DEBUG] => "SFTP (blocking): Opening remote file for reading: {}", remote_file_path.display());
-            let mut remote_file = sftp.open(remote_file_path.as_path())?;
-            
-            let mut buffer = Vec::new();
-            remote_file.read_to_end(&mut buffer)?;
-            
-            log!([DEBUG] => "SFTP (blocking): Successfully read {} bytes.", buffer.len());
-            Ok(buffer)
-        })
-        .await?
-    }
-}
-
-impl Clone for SftpStorage {
-    fn clone(&self) -> Self {
-        Self {
-            host: self.host.clone(),
-            port: self.port,
-            user: self.user.clone(),
-            password: self.password.clone(),
-            remote_path: self.remote_path.clone(),
-            public_url: self.public_url.clone(),
-        }
+        let data = self.download_from_remote(&remote_file_path).await?;
+        log!([DEBUG] => "SFTP (ssh2): Successfully read {} bytes.", data.len());
+        Ok(data)
     }
 }

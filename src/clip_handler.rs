@@ -1,17 +1,17 @@
 use crate::{settings::Settings, AppState};
-use actix_files::NamedFile;
 use actix_multipart::Multipart;
 use actix_web::{
     delete, get, http::header::ContentType, post, web, Error, HttpMessage, HttpRequest,
     HttpResponse, Responder,
 };
 use futures_util::stream::StreamExt;
-use std::path::PathBuf;
+use redis::AsyncCommands;
 use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{Clip, HostedClipInfo, User};
 
 const MAX_FILE_SIZE: usize = 1_073_741_824;
+const CACHE_TTL_SECONDS: u64 = 3600;
 
 #[post("/share")]
 pub async fn share_clip(
@@ -207,54 +207,88 @@ pub async fn serve_clip(
     }
 }
 
+async fn fetch_bytes_from_storage(
+    id: Uuid,
+    data: &web::Data<AppState>,
+    _settings: &web::Data<Settings>,
+) -> Result<Vec<u8>, HttpResponse> {
+    log!([DEBUG] => "STORAGE: Fetching raw clip file for ID: {}", id);
+    let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
+        .bind(id)
+        .fetch_one(&data.db_pool)
+        .await
+    {
+        Ok(c) => c,
+        Err(_) => return Err(HttpResponse::NotFound().finish()),
+    };
+
+    let file_bytes = match data.storage.download(&clip.public_url).await {
+        Ok(bytes) => {
+            log!([DEBUG] => "Successfully read {} bytes from storage for clip ID {}", bytes.len(), id);
+            bytes
+        }
+        Err(e) => {
+            log!([DEBUG] => "ERROR: Failed to download file from storage for clip ID {}: {:?}", id, e);
+            return Err(
+                HttpResponse::InternalServerError().body("Failed to retrieve clip from storage.")
+            );
+        }
+    };
+
+    Ok(file_bytes)
+}
+
 #[get("/clip/{id}/raw")]
 pub async fn serve_clip_raw(
     id: web::Path<Uuid>,
     data: web::Data<AppState>,
     settings: web::Data<Settings>,
-    req: HttpRequest,
 ) -> impl Responder {
-    log!([DEBUG] => "Serving raw clip file for ID: {}", *id);
-    let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
-        .bind(*id)
-        .fetch_one(&data.db_pool)
-        .await
-    {
-        Ok(c) => c,
-        Err(_) => return HttpResponse::NotFound().finish(),
+    let clip_id = *id;
+    let cache_key = format!("clip_raw:{}", clip_id);
+
+    let mut redis_conn = match data.redis_pool.get().await {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            log!([DEBUG] => "ERROR: Could not get Redis connection: {:?}. Serving from storage.", e);
+            None
+        }
     };
 
-    if settings.storage_type == "LOCAL" {
-        log!([DEBUG] => "Serving from LOCAL storage. Path: {}", clip.public_url);
-        let storage_dir = settings
-            .local_storage_path
-            .clone()
-            .unwrap_or_else(|| "./uploads".to_string());
-        let file_path = PathBuf::from(storage_dir).join(&clip.public_url);
-
-        match NamedFile::open(file_path) {
-            Ok(file) => file.into_response(&req),
-            Err(e) => {
-                log!([DEBUG] => "ERROR: Failed to open local file: {:?}", e);
-                HttpResponse::NotFound().finish()
-            }
-        }
-    } else {
-        log!([DEBUG] => "Fetching from remote storage backend for path: {}", clip.public_url);
-
-        match data.storage.download(&clip.public_url).await {
-            Ok(file_bytes) => {
-                log!([DEBUG] => "Successfully downloaded {} bytes from remote storage. Serving to client.", file_bytes.len());
-                HttpResponse::Ok()
+    if let Some(conn) = redis_conn.as_mut() {
+        log!([DEBUG] => "CACHE: Checking for key '{}'", cache_key);
+        match conn.get::<_, Vec<u8>>(&cache_key).await {
+            Ok(cached_data) if !cached_data.is_empty() => {
+                log!([DEBUG] => "CACHE HIT: Serving clip {} from Redis.", clip_id);
+                return HttpResponse::Ok()
                     .content_type("video/mp4")
-                    .body(file_bytes)
+                    .body(cached_data);
             }
+            Ok(_) => log!([DEBUG] => "CACHE MISS: Clip {} not in Redis.", clip_id),
             Err(e) => {
-                log!([DEBUG] => "ERROR: Failed to download file from remote storage: {:?}", e);
-                HttpResponse::InternalServerError().body("Failed to retrieve clip from storage.")
+                log!([DEBUG] => "ERROR: Redis GET failed for '{}': {:?}. Serving from storage.", cache_key, e)
             }
         }
     }
+
+    let file_bytes = match fetch_bytes_from_storage(clip_id, &data, &settings).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+
+    if let Some(conn) = redis_conn.as_mut() {
+        log!([DEBUG] => "CACHE SET: Caching {} bytes for clip {}.", file_bytes.len(), clip_id);
+        let result: redis::RedisResult<()> = conn
+            .set_ex(&cache_key, &file_bytes, CACHE_TTL_SECONDS)
+            .await;
+        if let Err(e) = result {
+            log!([DEBUG] => "ERROR: Redis SETEX failed for key '{}': {:?}", cache_key, e);
+        }
+    }
+
+    HttpResponse::Ok()
+        .content_type("video/mp4")
+        .body(file_bytes)
 }
 
 #[post("/clip/{id}/report")]
@@ -349,21 +383,24 @@ pub async fn delete_clip(
         Some(id) => *id,
         None => return HttpResponse::Unauthorized().finish(),
     };
-    log!([CLEANUP] => "Received delete request for clip {} from user {}", *id, user_id);
+    let clip_id = *id;
+    log!([CLEANUP] => "Received delete request for clip {} from user {}", clip_id, user_id);
 
-    let clip_to_delete =
-        match sqlx::query!("SELECT user_id, public_url FROM clips WHERE id = $1", *id)
-            .fetch_optional(&data.db_pool)
-            .await
-        {
-            Ok(Some(clip)) => clip,
-            Ok(None) => return HttpResponse::NotFound().finish(),
-            Err(_) => return HttpResponse::InternalServerError().finish(),
-        };
+    let clip_to_delete = match sqlx::query!(
+        "SELECT user_id, public_url FROM clips WHERE id = $1",
+        clip_id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
+    {
+        Ok(Some(clip)) => clip,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
 
     if clip_to_delete.user_id != user_id {
         log!([CLEANUP] => "User {} attempted to delete clip belonging to {}", user_id, clip_to_delete.user_id);
-        return HttpResponse::NotFound().finish();
+        return HttpResponse::Forbidden().finish();
     }
 
     log!([CLEANUP] => "Deleting file from storage: {}", clip_to_delete.public_url);
@@ -371,18 +408,30 @@ pub async fn delete_clip(
         log!([CLEANUP] => "ERROR: Failed to delete file from storage: {:?}", e);
     }
 
-    log!([CLEANUP] => "Deleting clip {} from database.", *id);
-    match sqlx::query!(
+    log!([CLEANUP] => "Deleting clip {} from database.", clip_id);
+    let db_result = sqlx::query!(
         "DELETE FROM clips WHERE id = $1 AND user_id = $2",
-        *id,
+        clip_id,
         user_id
     )
     .execute(&data.db_pool)
-    .await
-    {
-        Ok(_) => {
-            log!([CLEANUP] => "Successfully deleted clip {}.", *id);
+    .await;
+
+    match db_result {
+        Ok(result) if result.rows_affected() > 0 => {
+            log!([CLEANUP] => "Successfully deleted clip {}.", clip_id);
+            if let Ok(mut conn) = data.redis_pool.get().await {
+                let cache_key = format!("clip_raw:{}", clip_id);
+                log!([CLEANUP] => "CACHE DEL: Invalidating key '{}'", cache_key);
+                let _: redis::RedisResult<()> = conn.del(cache_key).await;
+            } else {
+                log!([DEBUG] => "ERROR: Could not get Redis connection for cache invalidation.");
+            }
             HttpResponse::NoContent().finish()
+        }
+        Ok(_) => {
+            log!([CLEANUP] => "Clip {} not found for user {} or already deleted.", clip_id, user_id);
+            HttpResponse::NotFound().finish()
         }
         Err(e) => {
             log!([CLEANUP] => "ERROR: Failed to delete clip from database: {:?}", e);

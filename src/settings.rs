@@ -15,6 +15,7 @@ pub struct Settings {
     pub sftp_password: Option<String>,
     pub sftp_remote_path: Option<String>,
     pub sftp_public_url: Option<String>,
+    pub sftp_server_public_key: Option<String>,
 
     pub limit_free: String,
     pub limit_tier1: String,
@@ -60,7 +61,7 @@ fn parse_size(size_str: &str) -> Result<i64, String> {
 
     let value = value_str
         .parse::<i64>()
-        .map_err(|_| format!("Invalid number in size string: '{}'", size_str))?;
+        .map_err(|_| format!("Invalid number in size string: '{size_str}'"))?;
 
     const KB: i64 = 1024;
     const MB: i64 = 1024 * KB;
@@ -73,9 +74,6 @@ fn parse_size(size_str: &str) -> Result<i64, String> {
         "MB" => Ok(value * MB),
         "GB" => Ok(value * GB),
         "TB" => Ok(value * TB),
-        _ => Err(format!(
-            "Unknown size unit '{}' in string '{}'",
-            unit, size_str
-        )),
+        _ => Err(format!("Unknown size unit '{unit}' in string '{size_str}'")),
     }
 }

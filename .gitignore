@@ -85,3 +85,4 @@ coverage/
 *.seed
 *.pid.lock
 uploads
+docker-compose.yml

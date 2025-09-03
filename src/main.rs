@@ -5,6 +5,7 @@ use actix_extensible_rate_limit::{
     RateLimiter,
 };
 use actix_web::{web, App, HttpServer};
+use deadpool_redis::{Config, Pool, Runtime};
 use dotenvy::dotenv;
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenUrl};
@@ -32,6 +33,7 @@ pub struct AppState {
     oauth_client: BasicClient,
     storage: Arc<dyn Storage>,
     tier_limits: Arc<HashMap<SubscriptionTier, i64>>,
+    pub redis_pool: Pool,
 }
 
 #[actix_web::main]
@@ -48,6 +50,13 @@ async fn main() -> std::io::Result<()> {
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redirect_uri = env::var("REDIRECT_URL").expect("REDIRECT_URL must be set");
+    let redis_url = env::var("REDIS_URL").expect("REDIS_URL must be set");
+
+    let redis_cfg = Config::from_url(redis_url);
+    let redis_pool = redis_cfg
+        .create_pool(Some(Runtime::Tokio1))
+        .expect("Failed to create Redis pool.");
+    log!([DEBUG] => "Redis connection pool created successfully.");
 
     let pool = db::create_pool(&database_url)
         .await
@@ -97,6 +106,7 @@ async fn main() -> std::io::Result<()> {
         oauth_client: client,
         storage,
         tier_limits,
+        redis_pool,
     };
 
     let app_settings = web::Data::new(config.clone());
