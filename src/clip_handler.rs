@@ -1,8 +1,9 @@
 use crate::{settings::Settings, AppState};
 use actix_multipart::Multipart;
 use actix_web::{
-    delete, get, http::header::ContentType, post, web, Error, HttpMessage, HttpRequest,
-    HttpResponse, Responder,
+    delete, get,
+    http::header::{ContentType, LOCATION},
+    post, web, Error, HttpMessage, HttpRequest, HttpResponse, Responder,
 };
 use futures_util::stream::StreamExt;
 use redis::AsyncCommands;
@@ -245,6 +246,23 @@ pub async fn serve_clip_raw(
     settings: web::Data<Settings>,
 ) -> impl Responder {
     let clip_id = *id;
+
+    let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
+        .bind(clip_id)
+        .fetch_one(&data.db_pool)
+        .await
+    {
+        Ok(c) => c,
+        Err(_) => return HttpResponse::NotFound().finish(),
+    };
+
+    if clip.public_url.starts_with("http") {
+        log!([DEBUG] => "Redirecting to direct storage URL: {}", clip.public_url);
+        return HttpResponse::Found()
+            .append_header((LOCATION, clip.public_url))
+            .finish();
+    }
+
     let cache_key = format!("clip_raw:{}", clip_id);
 
     let mut redis_conn = match data.redis_pool.get().await {
