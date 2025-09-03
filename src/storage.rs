@@ -133,6 +133,7 @@ impl SftpStorage {
             sess.set_blocking(true);
             sess.set_tcp_stream(tcp);
             sess.handshake()?;
+
             if let Some(pw) = password {
                 sess.userauth_password(user.as_str(), &pw)?;
             } else {
@@ -147,14 +148,6 @@ impl SftpStorage {
             Ok(result)
         })
         .await?
-    }
-
-    async fn get_sftp(&self) -> Result<Sftp> {
-        self.with_ssh2(|sess| {
-            let sftp = sess.sftp()?;
-            Ok(sftp)
-        })
-        .await
     }
 
     async fn upload_to_remote(&self, remote_path: &str, data: &[u8]) -> Result<()> {
@@ -221,18 +214,13 @@ impl Storage for SftpStorage {
 
         self.upload_to_remote(&remote_file_path, &data).await?;
 
-        let public_url = format!("{}/{}", self.public_url, unique_filename);
-        Ok(public_url)
+        Ok(unique_filename)
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
-        log!([CLEANUP] => "SFTP (ssh2): Deleting file from URL '{}'", storage_path);
-        let file_name = Path::new(storage_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow!("Invalid storage_path for deletion: {}", storage_path))?;
+        log!([CLEANUP] => "SFTP (ssh2): Deleting file from filename '{}'", storage_path);
         let remote_dir = self.remote_path.trim_end_matches('/');
-        let remote_file_path = format!("{}/{}", remote_dir, file_name);
+        let remote_file_path = format!("{}/{}", remote_dir, storage_path);
 
         self.delete_remote_file(&remote_file_path).await?;
         log!([CLEANUP] => "SFTP (ssh2): Deletion successful.");
@@ -240,13 +228,9 @@ impl Storage for SftpStorage {
     }
 
     async fn download(&self, storage_path: &str) -> Result<Vec<u8>> {
-        log!([DEBUG] => "SFTP (ssh2): Downloading file from URL '{}'", storage_path);
-        let file_name = Path::new(storage_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow!("Invalid storage_path for download: {}", storage_path))?;
+        log!([DEBUG] => "SFTP (ssh2): Downloading file from filename '{}'", storage_path);
         let remote_dir = self.remote_path.trim_end_matches('/');
-        let remote_file_path = format!("{}/{}", remote_dir, file_name);
+        let remote_file_path = format!("{}/{}", remote_dir, storage_path);
 
         let data = self.download_from_remote(&remote_file_path).await?;
         log!([DEBUG] => "SFTP (ssh2): Successfully read {} bytes.", data.len());
