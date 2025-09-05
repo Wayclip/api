@@ -211,7 +211,9 @@ async fn fetch_bytes_from_storage(
     id: Uuid,
     data: &web::Data<AppState>,
 ) -> Result<Vec<u8>, HttpResponse> {
-    log!([DEBUG] => "STORAGE: Fetching raw clip file for ID: {}", id);
+    log!([DEBUG] => "FETCH_FN_ENTRY: Fetching raw clip file for ID: {}", id);
+
+    log!([DEBUG] => "PRE_DB_FETCH: Querying database for clip metadata for ID: {}", id);
     let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
         .bind(id)
         .fetch_one(&data.db_pool)
@@ -220,7 +222,9 @@ async fn fetch_bytes_from_storage(
         Ok(c) => c,
         Err(_) => return Err(HttpResponse::NotFound().finish()),
     };
+    log!([DEBUG] => "POST_DB_FETCH: Successfully found clip metadata for ID: {}", id);
 
+    log!([DEBUG] => "PRE_STORAGE_DOWNLOAD: Calling storage.download() for clip ID: {}", id);
     let file_bytes = match data.storage.download(&clip.public_url).await {
         Ok(bytes) => {
             log!([DEBUG] => "Successfully read {} bytes from storage for clip ID {}", bytes.len(), id);
@@ -240,10 +244,14 @@ async fn fetch_bytes_from_storage(
 #[get("/clip/{id}/raw")]
 pub async fn serve_clip_raw(id: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
     let clip_id = *id;
+    log!([DEBUG] => "HANDLER_ENTRY: /clip/{}/raw", clip_id);
     let cache_key = format!("clip_raw:{}", clip_id);
 
     let mut redis_conn = match data.redis_pool.get().await {
-        Ok(conn) => Some(conn),
+        Ok(conn) => {
+            log!([DEBUG] => "Successfully acquired Redis connection for clip {}", clip_id);
+            Some(conn)
+        }
         Err(e) => {
             log!([DEBUG] => "ERROR: Could not get Redis connection: {:?}. Serving from storage.", e);
             None
@@ -266,10 +274,12 @@ pub async fn serve_clip_raw(id: web::Path<Uuid>, data: web::Data<AppState>) -> i
         }
     }
 
+    log!([DEBUG] => "PRE_FETCH: About to call fetch_bytes_from_storage for clip {}", clip_id);
     let file_bytes = match fetch_bytes_from_storage(clip_id, &data).await {
         Ok(bytes) => bytes,
         Err(response) => return response,
     };
+    log!([DEBUG] => "POST_FETCH: Successfully retrieved bytes for clip {}", clip_id);
 
     if let Some(conn) = redis_conn.as_mut() {
         log!([DEBUG] => "CACHE SET: Caching {} bytes for clip {}.", file_bytes.len(), clip_id);
