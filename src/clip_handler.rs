@@ -4,6 +4,7 @@ use actix_web::{
     delete, get, http::header::ContentType, post, web, Error, HttpMessage, HttpRequest,
     HttpResponse, Responder,
 };
+use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
 use redis::AsyncCommands;
 use uuid::Uuid;
@@ -134,6 +135,14 @@ pub async fn share_clip(
     }
 }
 
+struct ClipDetails {
+    id: Uuid,
+    file_name: String,
+    created_at: DateTime<Utc>,
+    username: String,
+    avatar_url: Option<String>,
+}
+
 #[get("/clip/{id}")]
 pub async fn serve_clip(
     req: HttpRequest,
@@ -142,16 +151,37 @@ pub async fn serve_clip(
     settings: web::Data<Settings>,
 ) -> impl Responder {
     log!([DEBUG] => "Serving clip page for ID: {}", *id);
-    let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
-        .bind(*id)
-        .fetch_one(&data.db_pool)
-        .await
+
+    let clip_details = match sqlx::query_as!(
+        ClipDetails,
+        r#"
+        SELECT
+            c.id,
+            c.file_name,
+            c.created_at,
+            u.username,
+            u.avatar_url
+        FROM clips c
+        JOIN users u ON c.user_id = u.id
+        WHERE c.id = $1
+        "#,
+        *id
+    )
+    .fetch_one(&data.db_pool)
+    .await
     {
-        Ok(c) => c,
+        Ok(details) => details,
         Err(_) => return HttpResponse::NotFound().body("Clip not found."),
     };
 
-    let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip.id);
+    let clip_url = format!("{}/clip/{}", settings.public_url, clip_details.id);
+    let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
+    let report_url = format!("/clip/{}/report", clip_details.id);
+    let uploader_avatar = clip_details
+        .avatar_url
+        .clone()
+        .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string());
+    let formatted_date = clip_details.created_at.format("%B %e, %Y").to_string();
 
     let user_agent = req
         .headers()
@@ -162,70 +192,31 @@ pub async fn serve_clip(
         .iter()
         .any(|bot| user_agent.contains(bot));
 
-    if is_bot {
+    let html_body = if is_bot {
         log!([DEBUG] => "Bot detected ('{}'), serving meta tags.", user_agent);
-        let html = format!(
-            r#"<!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8" />
-                <meta property="og:title" content="A clip from Wayclip" />
-                <meta property="og:description" content="File: {}" />
-                <meta property="og:type" content="video.other" />
-                <meta property="og:video" content="{}" />
-                <meta property="og:video:type" content="video/mp4" />
-                <meta property="og:video:width" content="1280" />
-                <meta property="og:video:height" content="720" />
-                <meta name="twitter:card" content="player" />
-                <meta name="twitter:title" content="A clip from Wayclip" />
-                <meta name="twitter:description" content="File: {}" />
-                <meta name="twitter:player" content="{}" />
-                <meta name="twitter:player:width" content="1280" />
-                <meta name="twitter:player:height" content="720" />
-            </head>
-            <body>Video shared from Wayclip.</body>
-            </html>"#,
-            clip.file_name, raw_url, clip.file_name, raw_url
-        );
-        HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(html)
+        let template = include_str!("../assets/embed.html");
+        template
+            .replace("{{FILE_NAME}}", &clip_details.file_name)
+            .replace("{{USERNAME}}", &clip_details.username)
+            .replace("{{UPLOAD_DATE}}", &formatted_date)
+            .replace("{{CLIP_URL}}", &clip_url)
+            .replace("{{RAW_URL}}", &raw_url)
+            .replace("{{AVATAR_URL}}", &uploader_avatar)
     } else {
         log!([DEBUG] => "Regular user detected, serving video player page.");
-        let report_url = format!("/clip/{}/report", clip.id);
-        let html = format!(
-            r#"<!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8" />
-                <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-                <title>Wayclip - {}</title>
-                <style>
-                    body, html {{ margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #161616; color: #e0e0e0; }}
-                    .container {{ display: flex; flex-direction: column; height: 100%; }}
-                    video {{ width: 100%; flex-grow: 1; object-fit: contain; background-color: #000; }}
-                    .footer {{ background-color: #1f1f1f; padding: 12px 20px; text-align: center; border-top: 1px solid #333; }}
-                    .footer form button {{ background: #3a3a3a; border: 1px solid #555; color: #fff; padding: 8px 15px; cursor: pointer; border-radius: 5px; font-size: 14px; }}
-                    .footer form button:hover {{ background: #4a4a4a; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <video controls autoplay muted playsinline src="{}"></video>
-                    <div class="footer">
-                        <form action="{}" method="post" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').innerText='Submitting...';">
-                            <button type="submit">Report Clip</button>
-                        </form>
-                    </div>
-                </div>
-            </body>
-            </html>"#,
-            clip.file_name, raw_url, report_url
-        );
-        HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(html)
-    }
+        let template = include_str!("../assets/view.html");
+        template
+            .replace("{{FILE_NAME}}", &clip_details.file_name)
+            .replace("{{RAW_URL}}", &raw_url)
+            .replace("{{AVATAR_URL}}", &uploader_avatar)
+            .replace("{{USERNAME}}", &clip_details.username)
+            .replace("{{UPLOAD_DATE}}", &formatted_date)
+            .replace("{{REPORT_URL}}", &report_url)
+    };
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(html_body)
 }
 
 async fn fetch_bytes_from_storage(
