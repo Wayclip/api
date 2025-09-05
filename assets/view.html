@@ -23,11 +23,21 @@
         background-color: var(--background);
         color: var(--primary-text);
       }
+      header {
+        background-color: var(--surface);
+        padding: 12px 24px;
+        border-bottom: 1px solid var(--border-color);
+        text-align: center;
+      }
+      header a {
+        color: #fff;
+        text-decoration: none;
+        font-weight: bold;
+      }
       .container {
         display: flex;
         flex-direction: column;
-        height: 100%;
-        max-width: 1200px;
+        height: calc(100% - 48px);
         margin: 0 auto;
       }
       video {
@@ -88,8 +98,11 @@
     </style>
   </head>
   <body>
+    <header>
+      <a href="https://wayclip.com">Wayclip</a>
+    </header>
     <div class="container">
-      <video controls autoplay muted playsinline src="{{RAW_URL}}"></video>
+      <video controls autoplay playsinline src="{{RAW_URL}}"></video>
       <div class="footer">
         <div class="uploader-info">
           <img src="{{AVATAR_URL}}" alt="Uploader's avatar" />
