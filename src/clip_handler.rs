@@ -42,12 +42,15 @@ pub async fn share_clip(
     }
 
     let tier_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
-    let current_usage: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM clips WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_one(&data.db_pool)
-            .await
-            .unwrap_or(0);
+
+    let current_usage: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&data.db_pool)
+    .await
+    .unwrap_or(0);
+
     log!([DEBUG] => "User '{}' storage usage: {} / {}", user.username, current_usage, tier_limit);
 
     if let Some(item) = payload.next().await {
@@ -82,7 +85,7 @@ pub async fn share_clip(
         log!([DEBUG] => "Uploading file to storage backend...");
         let storage_path = data
             .storage
-            .upload(&filename, file_data)
+            .upload(&filename, file_data.clone())
             .await
             .map_err(|e| {
                 log!([DEBUG] => "ERROR: Storage upload failed: {:?}", e);
@@ -105,6 +108,24 @@ pub async fn share_clip(
             actix_web::error::ErrorInternalServerError("Failed to save clip metadata.")
         })?;
         log!([DEBUG] => "Clip metadata saved to DB. Clip ID: {}", new_clip.id);
+
+        let redis_pool = data.redis_pool.clone();
+        let clip_id_for_cache = new_clip.id;
+        tokio::spawn(async move {
+            log!([DEBUG] => "CACHE_WARM: Starting background cache for new clip {}", clip_id_for_cache);
+            if let Ok(mut conn) = redis_pool.get().await {
+                let cache_key = format!("clip_raw:{}", clip_id_for_cache);
+                let result: redis::RedisResult<()> =
+                    conn.set_ex(&cache_key, &file_data, CACHE_TTL_SECONDS).await;
+                if let Err(e) = result {
+                    log!([DEBUG] => "ERROR: CACHE_WARM: Redis SETEX failed for key '{}': {:?}", cache_key, e);
+                } else {
+                    log!([DEBUG] => "CACHE_WARM: Successfully cached {} bytes for clip {}.", file_data.len(), clip_id_for_cache);
+                }
+            } else {
+                log!([DEBUG] => "ERROR: CACHE_WARM: Could not get Redis connection for caching.");
+            }
+        });
 
         let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
         Ok(HttpResponse::Ok().json(serde_json::json!({ "url": response_url })))

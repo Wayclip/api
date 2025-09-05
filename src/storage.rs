@@ -127,40 +127,22 @@ impl SftpStorage {
         let password = self.password.clone();
 
         task::spawn_blocking(move || -> Result<T> {
-            println!(
-                "[BLOCKING_TASK] Starting SFTP connection to {}:{}",
-                host, port
-            );
             let addr = format!("{}:{}", host, port);
-
-            println!("[BLOCKING_TASK] Attempting TCP connect...");
             let tcp = std::net::TcpStream::connect(addr)?;
-            println!("[BLOCKING_TASK] TCP connection successful.");
-
             let mut sess = Ssh2Session::new()?;
             sess.set_blocking(true);
             sess.set_tcp_stream(tcp);
-
-            println!("[BLOCKING_TASK] Attempting SSH handshake...");
             sess.handshake()?;
-            println!("[BLOCKING_TASK] SSH handshake successful.");
 
             if let Some(pw) = password {
-                println!(
-                    "[BLOCKING_TASK] Attempting password authentication for user '{}'...",
-                    user
-                );
                 sess.userauth_password(user.as_str(), &pw)?;
-                println!("[BLOCKING_TASK] userauth_password call complete.");
             } else {
                 return Err(anyhow!("SFTP password authentication is required"));
             }
 
             if !sess.authenticated() {
-                println!("[BLOCKING_TASK] SFTP authentication failed.");
                 return Err(anyhow!("SFTP authentication failed."));
             }
-            println!("[BLOCKING_TASK] SFTP authentication successful.");
 
             let result = f(&sess)?;
             Ok(result)
