@@ -58,9 +58,9 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
 
 RUN mkdir /out && \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        cp /usr/src/app/target/aarch64-unknown-linux-gnu/release/wayclip_api /out/; \
+        cp /usr/src/app/target/aarch64-unknown-linux-gnu/release/wayclip-api /out/; \
     else \
-        cp /usr/src/app/target/release/wayclip_api /out/; \
+        cp /usr/src/app/target/release/wayclip-api /out/; \
     fi && \
     cp /usr/local/cargo/bin/sqlx /out/
 
@@ -74,8 +74,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN mkdir -p /usr/src/app
 
-COPY --from=builder /out/wayclip_api /usr/local/bin/
+COPY --from=builder /out/wayclip-api /usr/local/bin/
 COPY --from=builder /out/sqlx /usr/local/bin/
 COPY --from=builder /usr/src/app/migrations /usr/src/app/migrations
 
-ENTRYPOINT ["/usr/local/bin/wayclip_api"]
+ENTRYPOINT ["/usr/local/bin/wayclip-api"]

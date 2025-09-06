@@ -1,10 +1,10 @@
 [package]
-name = "wayclip_api"
-version = "0.1.13"
+name = "wayclip-api"
+version = "0.1.14"
 edition = "2021"
 
 [[bin]]
-name = "wayclip_api"
+name = "wayclip-api"
 path = "src/main.rs"
 
 [package.metadata.sqlx]
@@ -55,3 +55,4 @@ russh-sftp = "2.1.1"
 ssh-key = "0.6.7"
 base64 = "0.22.1"
 ssh2 = "0.9.5"
+r2d2 = "0.8.10"

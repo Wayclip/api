@@ -85,7 +85,9 @@ async fn main() -> std::io::Result<()> {
 
     let storage: Arc<dyn Storage> = match config.storage_type.as_str() {
         "LOCAL" => Arc::new(LocalStorage::new(&config)),
-        "SFTP" => Arc::new(SftpStorage::new(&config)),
+        "SFTP" => Arc::new(
+            SftpStorage::new(&config).expect("Failed to create SFTP Storage with connection pool"),
+        ),
         _ => panic!("Invalid STORAGE_TYPE specified"),
     };
     log!([DEBUG] => "Storage backend initialized: {}", config.storage_type);

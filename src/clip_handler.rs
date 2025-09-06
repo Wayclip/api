@@ -171,7 +171,13 @@ pub async fn serve_clip(
     .await
     {
         Ok(details) => details,
-        Err(_) => return HttpResponse::NotFound().body("Clip not found."),
+        Err(_) => {
+            log!([WARN] => "Clip with ID {} not found.", *id);
+            let template = include_str!("../assets/not_found.html");
+            return HttpResponse::NotFound()
+                .content_type("text/html; charset=utf-8")
+                .body(template);
+        }
     };
 
     let clip_url = format!("{}/clip/{}", settings.public_url, clip_details.id);
