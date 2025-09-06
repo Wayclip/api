@@ -7933,8 +7933,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "wayclip_api"
-version = "0.1.13"
+name = "wayclip-api"
+version = "0.1.14"
 dependencies = [
  "actix-extensible-rate-limit",
  "actix-files",

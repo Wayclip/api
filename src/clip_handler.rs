@@ -172,7 +172,7 @@ pub async fn serve_clip(
     {
         Ok(details) => details,
         Err(_) => {
-            log!([WARN] => "Clip with ID {} not found.", *id);
+            log!([DEBUG] => "Clip with ID {} not found.", *id);
             let template = include_str!("../assets/not_found.html");
             return HttpResponse::NotFound()
                 .content_type("text/html; charset=utf-8")
