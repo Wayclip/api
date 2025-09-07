@@ -56,7 +56,7 @@ impl From<ssh2::Error> for Ssh2ManagerError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Ssh2ConnectionManager {
     host: String,
     port: u16,
@@ -169,6 +169,7 @@ impl Storage for LocalStorage {
 pub struct SftpStorage {
     pool: r2d2::Pool<Ssh2ConnectionManager>,
     remote_path: String,
+    connection_manager: Ssh2ConnectionManager,
 }
 
 impl SftpStorage {
@@ -194,7 +195,7 @@ impl SftpStorage {
             .max_size(15)
             .min_idle(Some(2))
             .connection_timeout(std::time::Duration::from_secs(10))
-            .build(manager)
+            .build(manager.clone())
             .map_err(|e| anyhow!("Failed to build SFTP connection pool: {}", e))?;
 
         log!([DEBUG] => "SFTP connection pool created successfully.");
@@ -205,6 +206,7 @@ impl SftpStorage {
                 .sftp_remote_path
                 .clone()
                 .expect("SFTP_REMOTE_PATH is required"),
+            connection_manager: manager,
         })
     }
 }
@@ -265,14 +267,15 @@ impl Storage for SftpStorage {
     async fn download_stream(&self, storage_path: &str) -> Result<ByteStream> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
         let remote_file_path = format!("{}/{}", remote_dir, storage_path);
-        let pool = self.pool.clone();
+
+        let connection_manager = self.connection_manager.clone();
 
         let (tx, rx) = mpsc::channel(4);
 
         task::spawn_blocking(move || {
             let result: Result<()> = (|| {
-                log!([DEBUG] => "SFTP POOL: Getting connection for download stream: {}", remote_file_path);
-                let conn = pool.get()?;
+                log!([DEBUG] => "SFTP STREAM: Creating a new dedicated connection for stream: {}", remote_file_path);
+                let conn = connection_manager.connect()?;
                 let sftp = conn.sftp()?;
                 let mut remote_file = sftp.open(Path::new(&remote_file_path))?;
 
