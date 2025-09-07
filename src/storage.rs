@@ -2,15 +2,19 @@ use crate::log;
 use crate::settings::Settings;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::stream::{Stream, StreamExt};
 use r2d2::ManageConnection;
 use ssh2::{OpenFlags, OpenType, Session};
 use std::error::Error as StdError;
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use tokio::fs;
+use tokio::fs::File;
+use tokio::sync::mpsc;
 use tokio::task;
+use tokio_util::codec::{BytesCodec, FramedRead};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -87,18 +91,17 @@ impl ManageConnection for Ssh2ConnectionManager {
     }
 
     fn has_broken(&self, conn: &mut Self::Connection) -> bool {
-        if conn.is_blocking() {
-            return true;
-        }
         conn.keepalive_send().is_err()
     }
 }
+
+type ByteStream = Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin>;
 
 #[async_trait]
 pub trait Storage: Send + Sync {
     async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String>;
     async fn delete(&self, storage_path: &str) -> Result<()>;
-    async fn download(&self, storage_path: &str) -> Result<Vec<u8>>;
+    async fn download_stream(&self, storage_path: &str) -> Result<ByteStream>;
 }
 
 pub struct LocalStorage {
@@ -121,14 +124,14 @@ impl LocalStorage {
 impl Storage for LocalStorage {
     async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String> {
         log!([DEBUG] => "LOCAL: Uploading file '{}'", file_name);
-        fs::create_dir_all(&self.storage_path).await?;
+        tokio::fs::create_dir_all(&self.storage_path).await?;
         let extension = Path::new(file_name)
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("bin");
         let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
         let file_path = self.storage_path.join(&unique_filename);
-        fs::write(&file_path, data).await?;
+        tokio::fs::write(&file_path, data).await?;
         Ok(unique_filename)
     }
 
@@ -141,12 +144,12 @@ impl Storage for LocalStorage {
                 storage_path
             ));
         }
-        fs::remove_file(&file_path).await?;
+        tokio::fs::remove_file(&file_path).await?;
         Ok(())
     }
 
-    async fn download(&self, storage_path: &str) -> Result<Vec<u8>> {
-        log!([DEBUG] => "LOCAL: Downloading file '{}'", storage_path);
+    async fn download_stream(&self, storage_path: &str) -> Result<ByteStream> {
+        log!([DEBUG] => "LOCAL: Streaming file '{}'", storage_path);
         let file_path = self.storage_path.join(storage_path);
         if !file_path.starts_with(&self.storage_path) {
             return Err(anyhow!(
@@ -154,9 +157,12 @@ impl Storage for LocalStorage {
                 storage_path,
             ));
         }
-        let data = fs::read(&file_path).await?;
-        log!([DEBUG] => "LOCAL: Successfully read {} bytes.", data.len());
-        Ok(data)
+        let file = File::open(file_path).await?;
+
+        let stream = FramedRead::new(file, BytesCodec::new())
+            .map(|result| result.map(|bytes_mut| bytes_mut.freeze()));
+
+        Ok(Box::new(stream))
     }
 }
 
@@ -256,27 +262,45 @@ impl Storage for SftpStorage {
         Ok(())
     }
 
-    async fn download(&self, storage_path: &str) -> Result<Vec<u8>> {
+    async fn download_stream(&self, storage_path: &str) -> Result<ByteStream> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
         let remote_file_path = format!("{}/{}", remote_dir, storage_path);
-
         let pool = self.pool.clone();
-        let file_bytes = task::spawn_blocking(move || -> Result<Vec<u8>> {
-            log!([DEBUG] => "SFTP POOL: Getting connection for download: {}", remote_file_path);
-            let conn = pool.get()?;
-            let sftp = conn.sftp()?;
-            let mut remote_file = sftp.open(Path::new(&remote_file_path))?;
 
-            let file_stat = remote_file.stat()?;
-            let file_size = file_stat.size.unwrap_or(0) as usize;
-            let mut buf = Vec::with_capacity(file_size);
+        let (tx, rx) = mpsc::channel(4);
 
-            remote_file.read_to_end(&mut buf)?;
-            log!([DEBUG] => "SFTP POOL: Successfully read {} bytes.", buf.len());
-            Ok(buf)
-        })
-        .await??;
+        task::spawn_blocking(move || {
+            let result: Result<()> = (|| {
+                log!([DEBUG] => "SFTP POOL: Getting connection for download stream: {}", remote_file_path);
+                let conn = pool.get()?;
+                let sftp = conn.sftp()?;
+                let mut remote_file = sftp.open(Path::new(&remote_file_path))?;
 
-        Ok(file_bytes)
+                let mut buffer = vec![0; 1024 * 1024];
+                loop {
+                    match remote_file.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if tx
+                                .blocking_send(Ok(Bytes::copy_from_slice(&buffer[..n])))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                let _ = tx.blocking_send(Err(std::io::Error::new(ErrorKind::Other, e.to_string())));
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Box::new(stream))
     }
 }
