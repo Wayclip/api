@@ -1,9 +1,12 @@
 use crate::settings::Settings;
 use crate::storage::{LocalStorage, SftpStorage, Storage};
+use actix_cors::Cors;
 use actix_extensible_rate_limit::{
     backend::{memory::InMemoryBackend, SimpleInputFunctionBuilder},
     RateLimiter,
 };
+use actix_web::dev::RequestHead;
+use actix_web::http::header::HeaderValue;
 use actix_web::{web, App, HttpServer};
 use deadpool_redis::{Config, Pool, Runtime};
 use dotenvy::dotenv;
@@ -117,15 +120,39 @@ async fn main() -> std::io::Result<()> {
     log!([DEBUG] => "Starting Actix web server on 0.0.0.0:8080...");
 
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allowed_origin_fn(|origin: &HeaderValue, _req_head: &RequestHead| {
+                let allowed_origins = [
+                    "http://localhost:3000",
+                    "https://wayclip.com",
+                    "https://dash.wayclip.com",
+                ];
+                if let Ok(s) = origin.to_str() {
+                    allowed_origins.contains(&s)
+                } else {
+                    false
+                }
+            })
+            .allowed_methods(vec!["GET", "POST", "DELETE"])
+            .allowed_headers(vec![
+                actix_web::http::header::AUTHORIZATION,
+                actix_web::http::header::ACCEPT,
+                actix_web::http::header::CONTENT_TYPE,
+            ])
+            .supports_credentials()
+            .max_age(3600);
+
         let input = SimpleInputFunctionBuilder::new(Duration::from_secs(3600), 20)
             .real_ip_key()
             .build();
         let ratelimiter = RateLimiter::builder(backend.clone(), input)
             .add_headers()
             .build();
+
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(app_settings.clone())
+            .wrap(cors)
             .wrap(TracingLogger::default())
             .service(
                 web::scope("/auth")
@@ -146,6 +173,7 @@ async fn main() -> std::io::Result<()> {
             )
             .service(clip_handler::serve_clip)
             .service(clip_handler::serve_clip_raw)
+            .service(clip_handler::serve_clip_oembed)
             .service(clip_handler::report_clip)
     })
     .bind(("0.0.0.0", 8080))?

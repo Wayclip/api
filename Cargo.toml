@@ -1,6 +1,6 @@
 [package]
 name = "wayclip-api"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2021"
 
 [[bin]]
@@ -59,3 +59,4 @@ r2d2 = "0.8.10"
 tokio-util = { version = "0.7.16", features = ["codec"] }
 tokio-stream = "0.1.17"
 bytes = "1.10.1"
+actix-cors = "0.7.1"

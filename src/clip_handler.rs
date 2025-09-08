@@ -208,6 +208,7 @@ pub async fn serve_clip(
             .replace("{{CLIP_URL}}", &clip_url)
             .replace("{{RAW_URL}}", &raw_url)
             .replace("{{AVATAR_URL}}", &uploader_avatar)
+            .replace("{{UUID}}", &clip_details.id.to_string())
     } else {
         log!([DEBUG] => "Regular user detected, serving video player page.");
         let template = include_str!("../assets/view.html");
@@ -421,4 +422,59 @@ pub async fn delete_clip(
             HttpResponse::InternalServerError().finish()
         }
     }
+}
+
+#[get("/api/clip/{id}/meta")]
+pub async fn serve_clip_oembed(
+    id: web::Path<Uuid>,
+    data: web::Data<AppState>,
+    settings: web::Data<Settings>,
+) -> impl Responder {
+    let clip_details = match sqlx::query_as!(
+        ClipDetails,
+        r#"
+        SELECT
+            c.id,
+            c.file_name,
+            c.created_at,
+            u.username,
+            u.avatar_url
+        FROM clips c
+        JOIN users u ON c.user_id = u.id
+        WHERE c.id = $1
+        "#,
+        *id
+    )
+    .fetch_one(&data.db_pool)
+    .await
+    {
+        Ok(details) => details,
+        Err(_) => return HttpResponse::NotFound().finish(),
+    };
+
+    let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
+    let thumbnail_url = clip_details
+        .avatar_url
+        .clone()
+        .unwrap_or_else(|| format!("{}/avatars/{}", settings.public_url, clip_details.username));
+
+    let oembed_response = serde_json::json!({
+        "version": "1.0",
+        "type": "video",
+        "title": clip_details.file_name,
+        "author_name": clip_details.username,
+        "provider_name": "Wayclip",
+        "provider_url": settings.public_url,
+        "html": format!(
+            "<iframe src=\"{}\" width=\"1280\" height=\"720\" frameborder=\"0\" allowfullscreen></iframe>",
+            raw_url
+        ),
+        "width": 1280,
+        "height": 720,
+        "thumbnail_url": thumbnail_url,
+        "thumbnail_width": 1280,
+        "thumbnail_height": 720
+    });
+
+    HttpResponse::Ok().json(oembed_response)
 }
