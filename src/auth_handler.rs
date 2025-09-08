@@ -173,7 +173,7 @@ async fn github_callback(
     } else {
         log!([AUTH] => "Redirecting web client and setting cookie.");
         let mut response = HttpResponse::Found();
-        response.append_header((LOCATION, "http://localhost:1420"));
+        response.append_header((LOCATION, final_redirect_str));
         response.cookie(
             Cookie::build("token", jwt)
                 .path("/")
