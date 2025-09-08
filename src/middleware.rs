@@ -43,16 +43,25 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         log!([DEBUG] => "Auth middleware processing request for URI: {}", req.uri());
-        let token = req
+
+        let mut token_str: Option<String> = req
             .headers()
             .get("Authorization")
             .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .map(|s| s.to_string());
 
-        match token {
+        if token_str.is_none() {
+            if let Some(cookie) = req.cookie("token") {
+                log!([DEBUG] => "Found 'token' in httpOnly cookie.");
+                token_str = Some(cookie.value().to_string());
+            }
+        }
+
+        match token_str {
             Some(token) => {
-                log!([DEBUG] => "Found Bearer token in Authorization header.");
-                match jwt::validate_jwt(token) {
+                log!([DEBUG] => "Found token, attempting validation.");
+                match jwt::validate_jwt(&token) {
                     Ok(claims) => {
                         log!([AUTH] => "Token validation successful for user ID: {}", claims.sub);
                         req.extensions_mut().insert(claims.sub);
@@ -70,7 +79,7 @@ where
                 }
             }
             None => {
-                log!([AUTH] => "No Authorization header or Bearer token found.");
+                log!([AUTH] => "No token found in Authorization header or cookie.");
                 Box::pin(async move {
                     Ok(req
                         .into_response(HttpResponse::Unauthorized().finish())

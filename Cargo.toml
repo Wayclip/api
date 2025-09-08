@@ -1,6 +1,6 @@
 [package]
 name = "wayclip-api"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 
 [[bin]]
@@ -47,7 +47,7 @@ actix-multipart = "0.7.2"
 actix-files = "0.6.6"
 actix-ratelimit = "0.3.1"
 actix-extensible-rate-limit = "0.4.0"
-wayclip_core = "0.1.0"
+wayclip_core = "0.1.4"
 russh = { version = "0.54.3", features = ["async-trait"] }
 redis = { version = "0.32.5", features = ["tokio-comp"] }
 deadpool-redis = "0.22.0"
