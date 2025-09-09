@@ -189,6 +189,7 @@ pub async fn serve_clip(
         .clone()
         .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string());
     let formatted_date = clip_details.created_at.format("%B %e, %Y").to_string();
+    let iso_date = clip_details.created_at.to_rfc3339();
 
     let user_agent = req
         .headers()
@@ -206,6 +207,7 @@ pub async fn serve_clip(
             .replace("{{FILE_NAME}}", &clip_details.file_name)
             .replace("{{USERNAME}}", &clip_details.username)
             .replace("{{UPLOAD_DATE}}", &formatted_date)
+            .replace("{{UPLOAD_DATE_ISO}}", &iso_date)
             .replace("{{CLIP_URL}}", &clip_url)
             .replace("{{RAW_URL}}", &raw_url)
             .replace("{{AVATAR_URL}}", &uploader_avatar)
