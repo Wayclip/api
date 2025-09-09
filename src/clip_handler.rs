@@ -6,6 +6,7 @@ use actix_web::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
+use http_range::HttpRange;
 use redis::AsyncCommands;
 use uuid::Uuid;
 use wayclip_core::log;
@@ -227,7 +228,11 @@ pub async fn serve_clip(
 }
 
 #[get("/clip/{id}/raw")]
-pub async fn serve_clip_raw(id: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+pub async fn serve_clip_raw(
+    req: HttpRequest,
+    id: web::Path<Uuid>,
+    data: web::Data<AppState>,
+) -> impl Responder {
     let clip_id = *id;
     log!([DEBUG] => "HANDLER_ENTRY: /clip/{}/raw", clip_id);
     let cache_key = format!("clip_raw:{}", clip_id);
@@ -261,12 +266,57 @@ pub async fn serve_clip_raw(id: web::Path<Uuid>, data: web::Data<AppState>) -> i
         Err(_) => return HttpResponse::NotFound().finish(),
     };
 
-    match data.storage.download_stream(&clip.public_url).await {
-        Ok(stream) => {
+    let range_header = req
+        .headers()
+        .get(actix_web::http::header::RANGE)
+        .and_then(|h| h.to_str().ok());
+
+    let stream_response_result = match range_header {
+        Some(range_str) => {
+            log!([DEBUG] => "STREAM: Client requested range: {}", range_str);
+            match HttpRange::parse(range_str, clip.file_size as u64) {
+                Ok(ranges) => {
+                    let range = ranges.first().cloned();
+                    let range_tuple =
+                        range.map(|r| (r.start, r.length.checked_sub(1).map(|l| r.start + l)));
+                    data.storage
+                        .download_stream(&clip.public_url, range_tuple)
+                        .await
+                }
+                Err(_) => {
+                    return HttpResponse::RangeNotSatisfiable().finish();
+                }
+            }
+        }
+        None => {
+            log!([DEBUG] => "STREAM: Client did not request a range. Sending full file.");
+            data.storage.download_stream(&clip.public_url, None).await
+        }
+    };
+
+    match stream_response_result {
+        Ok(stream_response) => {
             log!([DEBUG] => "STREAM: Sending stream to client for clip {}", clip_id);
-            HttpResponse::Ok()
+
+            let mut builder = if range_header.is_some() {
+                HttpResponse::PartialContent()
+            } else {
+                HttpResponse::Ok()
+            };
+
+            builder
                 .content_type("video/mp4")
-                .streaming(stream)
+                .insert_header((actix_web::http::header::ACCEPT_RANGES, "bytes"))
+                .insert_header((
+                    actix_web::http::header::CONTENT_LENGTH,
+                    stream_response.content_length,
+                ))
+                .insert_header((
+                    actix_web::http::header::CONTENT_RANGE,
+                    stream_response.content_range,
+                ));
+
+            builder.streaming(stream_response.stream)
         }
         Err(e) => {
             log!([DEBUG] => "ERROR: Failed to create download stream for clip {}: {:?}", clip_id, e);
@@ -424,7 +474,7 @@ pub async fn delete_clip(
     }
 }
 
-#[get("/api/clip/{id}/meta")]
+#[get("/clip/{id}/meta")]
 pub async fn serve_clip_oembed(
     id: web::Path<Uuid>,
     data: web::Data<AppState>,
