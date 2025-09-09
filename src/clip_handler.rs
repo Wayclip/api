@@ -378,23 +378,23 @@ pub async fn report_clip(
             log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
 
             let message = serde_json::json!({
-                "content": "🚨 New Clip Report! <@564472732071493633>",
-                "embeds": [{
-                    "title": "Reported Clip Details",
-                    "color": 15158332,
-                    "fields": [
-                        { "name": "Uploader", "value": format!("{} (`{}`)", report.username, report.user_id), "inline": true },
-                        { "name": "Reporter IP", "value": reporter_ip, "inline": true },
-                    ]
-                }],
-                "components": [{
-                    "type": 1,
-                    "components": [
-                        { "type": 2, "style": 5, "label": "View Clip", "url": clip_url },
-                        { "type": 2, "style": 4, "label": "Ban User & IP", "url": ban_url },
-                        { "type": 2, "style": 4, "label": "Remove Video", "url": remove_url }
-                    ]
-                }]
+            "content": "🚨 New Clip Report! <@564472732071493633>",
+            "embeds": [{
+                "title": "Reported Clip Details",
+                "color": 15158332,
+                "fields": [
+                    { "name": "Uploader", "value": format!("{} (`{}`)", report.username, report.user_id), "inline": true },
+                    { "name": "Reporter IP", "value": reporter_ip, "inline": true },
+                ]
+            }],
+            "components": [{
+                "type": 1,
+                "components": [
+                    { "type": 2, "style": 5, "label": "View Clip", "url": clip_url },
+                    { "type": 2, "style": 5, "label": "Ban User & IP", "url": ban_url },
+                    { "type": 2, "style": 5, "label": "Remove Video", "url": remove_url }
+                ]
+            }]
             });
 
             let client = reqwest::Client::new();
