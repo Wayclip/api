@@ -398,8 +398,24 @@ pub async fn report_clip(
             });
 
             let client = reqwest::Client::new();
-            if let Err(e) = client.post(url).json(&message).send().await {
-                log!([DEBUG] => "ERROR: Failed to send Discord notification: {}", e);
+            let response = client.post(url).json(&message).send().await;
+
+            match response {
+                Ok(res) => {
+                    if !res.status().is_success() {
+                        let status = res.status();
+                        let error_body = res
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Could not read response body".to_string());
+                        log!([DEBUG] => "ERROR: Discord webhook failed. Status: {}. Body: {}", status, error_body);
+                    } else {
+                        log!([DEBUG] => "Successfully sent Discord notification.");
+                    }
+                }
+                Err(e) => {
+                    log!([DEBUG] => "ERROR: Failed to send Discord notification request: {}", e);
+                }
             }
         }
     }
