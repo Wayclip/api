@@ -509,23 +509,26 @@ pub async fn serve_clip_oembed(
         .avatar_url
         .clone()
         .unwrap_or_else(|| format!("{}/avatars/{}", settings.public_url, clip_details.username));
+    let uploader_avatar = clip_details
+        .avatar_url
+        .clone()
+        .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string());
 
     let oembed_response = serde_json::json!({
         "version": "1.0",
         "type": "video",
-        "title": clip_details.file_name,
         "author_name": clip_details.username,
         "provider_name": "Wayclip",
         "provider_url": settings.public_url,
-        "html": format!(
-            "<iframe src=\"{}\" width=\"1280\" height=\"720\" frameborder=\"0\" allowfullscreen></iframe>",
-            raw_url
-        ),
-        "width": 1280,
-        "height": 720,
-        "thumbnail_url": thumbnail_url,
-        "thumbnail_width": 1280,
-        "thumbnail_height": 720
+        "thumbnail_url": uploader_avatar,
+        "thumbnail_width": 128,
+        "thumbnail_height": 128,
+        "title": clip_details.file_name,
+        "video": {
+            "url": raw_url,
+            "width": 1280,
+            "height": 720
+        }
     });
 
     HttpResponse::Ok().json(oembed_response)
