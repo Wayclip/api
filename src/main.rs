@@ -22,6 +22,7 @@ use tracing_actix_web::TracingLogger;
 use wayclip_core::log;
 use wayclip_core::models::SubscriptionTier;
 
+mod admin_handler;
 mod auth_handler;
 mod clip_handler;
 mod db;
@@ -170,6 +171,11 @@ async fn main() -> std::io::Result<()> {
                             .wrap(ratelimiter)
                             .service(clip_handler::share_clip),
                     ),
+            )
+            .service(
+                web::scope("/admin")
+                    .service(admin_handler::ban_user_and_ip)
+                    .service(admin_handler::remove_video),
             )
             .service(clip_handler::serve_clip)
             .service(clip_handler::serve_clip_raw)

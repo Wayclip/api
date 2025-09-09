@@ -4,7 +4,7 @@ use actix_web::{
     delete, get, http::header::ContentType, post, web, Error, HttpMessage, HttpRequest,
     HttpResponse, Responder,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
 use http_range::HttpRange;
 use redis::AsyncCommands;
@@ -349,7 +349,27 @@ pub async fn report_clip(
 
     if let Ok(report) = report_data {
         if let Some(url) = &settings.discord_webhook_url {
+            let new_token = Uuid::new_v4();
+            let expiration_time = Utc::now() + Duration::hours(24);
+
+            let db_result = sqlx::query!(
+                "INSERT INTO report_tokens (token, clip_id, user_id, expires_at) VALUES ($1, $2, $3, $4)",
+                new_token,
+                report.clip_id,
+                report.user_id,
+                expiration_time
+            )
+            .execute(&data.db_pool)
+            .await;
+
+            if let Err(e) = db_result {
+                log!([DEBUG] => "ERROR: Failed to create report token: {}", e);
+                return HttpResponse::InternalServerError().finish();
+            }
+
             let clip_url = format!("{}/clip/{}", settings.public_url, report.clip_id);
+            let ban_url = format!("{}/admin/ban/{}", settings.public_url, new_token);
+            let remove_url = format!("{}/admin/remove/{}", settings.public_url, new_token);
             let reporter_ip = req
                 .connection_info()
                 .realip_remote_addr()
@@ -363,9 +383,16 @@ pub async fn report_clip(
                     "title": "Reported Clip Details",
                     "color": 15158332,
                     "fields": [
-                        { "name": "Clip URL", "value": clip_url, "inline": false },
                         { "name": "Uploader", "value": format!("{} (`{}`)", report.username, report.user_id), "inline": true },
                         { "name": "Reporter IP", "value": reporter_ip, "inline": true },
+                    ]
+                }],
+                "components": [{
+                    "type": 1,
+                    "components": [
+                        { "type": 2, "style": 5, "label": "View Clip", "url": clip_url },
+                        { "type": 2, "style": 4, "label": "Ban User & IP", "url": ban_url },
+                        { "type": 2, "style": 4, "label": "Remove Video", "url": remove_url }
                     ]
                 }]
             });

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE report_tokens SET used_at = $1 WHERE token = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "951f6bee3d9a5d7953d240f0ac8d80c9b7d225363d7be77c55adfcd61b99c09c"
+}
