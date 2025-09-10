@@ -143,7 +143,6 @@ struct ClipDetails {
     avatar_url: Option<String>,
 }
 
-// serve_clip function is unchanged...
 #[get("/clip/{id}")]
 pub async fn serve_clip(
     req: HttpRequest,
@@ -382,35 +381,25 @@ pub async fn report_clip(
                     "title": "Reported Clip Details",
                     "color": 15158332,
                     "fields": [
-                        { "name": "Uploader", "value": format!("{} (`{}`)", report.username, report.user_id), "inline": true },
-                        { "name": "Reporter IP", "value": reporter_ip, "inline": true },
+                        {
+                            "name": "Uploader",
+                            "value": format!("{} (`{}`)", report.username, report.user_id),
+                            "inline": true
+                        },
+                        {
+                            "name": "Reporter IP",
+                            "value": reporter_ip,
+                            "inline": true
+                        },
+                        {
+                            "name": "Actions",
+                            "value": format!(
+                                "🔗 [View Clip]({})\n🔨 [Ban User & IP]({})\n🗑️ [Remove Video]({})",
+                                clip_url, ban_url, remove_url
+                            )
+                        }
                     ]
-                }],
-                "components": [
-                    {
-                        "type": 1,
-                        "components": [
-                            {
-                                "type": 2,
-                                "style": 5,
-                                "label": "View Clip",
-                                "url": clip_url
-                            },
-                            {
-                                "type": 2,
-                                "style": 5,
-                                "label": "Ban User & IP",
-                                "url": ban_url
-                            },
-                            {
-                                "type": 2,
-                                "style": 5,
-                                "label": "Remove Video",
-                                "url": remove_url
-                            }
-                        ]
-                    }
-                ]
+                }]
             });
 
             let client = reqwest::Client::new();
