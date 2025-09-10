@@ -113,7 +113,7 @@ pub trait Storage: Send + Sync {
     async fn download_stream(
         &self,
         storage_path: &str,
-        range: Option<(u64, Option<u64>)>,
+        range: Option<(u64, u64)>,
     ) -> Result<StreamResponse>;
 }
 
@@ -164,34 +164,21 @@ impl Storage for LocalStorage {
     async fn download_stream(
         &self,
         storage_path: &str,
-        range: Option<(u64, Option<u64>)>,
+        range: Option<(u64, u64)>,
     ) -> Result<StreamResponse> {
-        log!([DEBUG] => "LOCAL: Streaming file '{}' with range: {:?}", storage_path, range);
         let file_path = self.storage_path.join(storage_path);
-        if !file_path.starts_with(&self.storage_path) {
-            return Err(anyhow!(
-                "Invalid storage path for download: {}",
-                storage_path,
-            ));
-        }
-
-        let mut file = File::open(&file_path).await?;
+        let mut file = File::open(file_path).await?;
         let total_size = file.metadata().await?.len();
 
-        let (start, end) = match range {
-            Some((s, Some(e))) => (s, e.min(total_size - 1)),
-            Some((s, None)) => (s, total_size - 1),
-            None => (0, total_size - 1),
+        let (start, length) = match range {
+            Some((start, length)) => (start, length.min(total_size - start)),
+            None => (0, total_size),
         };
 
-        if start >= total_size {
-            return Err(anyhow!("Invalid range: start is beyond file size"));
-        }
+        let end = start + length - 1;
 
         file.seek(SeekFrom::Start(start)).await?;
-        let read_len = end - start + 1;
-
-        let stream = FramedRead::new(file.take(read_len), BytesCodec::new())
+        let stream = FramedRead::new(file.take(length), BytesCodec::new())
             .map(|result| result.map(|bytes_mut| bytes_mut.freeze()));
 
         let content_range = format!("bytes {}-{}/{}", start, end, total_size);
@@ -200,7 +187,7 @@ impl Storage for LocalStorage {
             stream: Box::new(stream),
             total_size,
             content_range,
-            content_length: read_len,
+            content_length: length,
         })
     }
 }
@@ -305,52 +292,42 @@ impl Storage for SftpStorage {
     async fn download_stream(
         &self,
         storage_path: &str,
-        range: Option<(u64, Option<u64>)>,
+        range: Option<(u64, u64)>,
     ) -> Result<StreamResponse> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
-        let remote_file_path = format!("{}/{}", remote_dir, storage_path);
+        let remote_file_path_str = format!("{}/{}", remote_dir, storage_path);
 
         let pool = self.pool.clone();
-        let remote_file_path_for_stat = remote_file_path.clone();
+        let remote_file_path_for_stat = remote_file_path_str.clone();
 
-        let (total_size, start, read_len) =
-            task::spawn_blocking(move || -> Result<(u64, u64, u64)> {
-                let conn = pool.get()?;
-                let sftp = conn.sftp()?;
-                let stat = sftp.stat(Path::new(&remote_file_path_for_stat))?;
-                let total_size = stat.size.unwrap_or(0);
+        let total_size = task::spawn_blocking(move || -> Result<u64> {
+            let conn = pool.get()?;
+            let sftp = conn.sftp()?;
+            let stat = sftp.stat(Path::new(&remote_file_path_for_stat))?;
+            Ok(stat.size.unwrap_or(0))
+        })
+        .await??;
 
-                if total_size == 0 {
-                    return Ok((0, 0, 0));
-                }
+        if total_size == 0 {
+            return Err(anyhow!("File size is 0 or could not be determined."));
+        }
 
-                let (start, end) = match range {
-                    Some((s, Some(e))) => (s, e.min(total_size.saturating_sub(1))),
-                    Some((s, None)) => (s, total_size.saturating_sub(1)),
-                    None => (0, total_size.saturating_sub(1)),
-                };
+        let (start, read_len) = match range {
+            Some((start, length)) => (start, length.min(total_size - start)),
+            None => (0, total_size),
+        };
+        let end = start + read_len - 1;
 
-                if start >= total_size {
-                    return Err(anyhow!("Invalid range: start is beyond file size"));
-                }
-
-                let read_len = end - start + 1;
-                Ok((total_size, start, read_len))
-            })
-            .await??;
-
-        let content_range = format!("bytes {}-{}/{}", start, start + read_len - 1, total_size);
+        let content_range = format!("bytes {}-{}/{}", start, end, total_size);
 
         let pool = self.pool.clone();
         let (tx, rx) = mpsc::channel(4);
 
         task::spawn_blocking(move || {
             let result: Result<()> = (|| {
-                log!([DEBUG] => "SFTP STREAM: Getting connection for stream: {}", remote_file_path);
                 let conn = pool.get()?;
                 let sftp = conn.sftp()?;
-                let mut remote_file = sftp.open(Path::new(&remote_file_path))?;
-
+                let mut remote_file = sftp.open(Path::new(&remote_file_path_str))?;
                 remote_file.seek(SeekFrom::Start(start))?;
 
                 let mut buffer = vec![0; 1024 * 512];
@@ -365,7 +342,6 @@ impl Storage for SftpStorage {
                                 .blocking_send(Ok(Bytes::copy_from_slice(&buffer[..n])))
                                 .is_err()
                             {
-                                log!([DEBUG] => "SFTP STREAM: Client disconnected, stopping stream.");
                                 break;
                             }
                             bytes_left_to_read -= n as u64;
@@ -383,10 +359,8 @@ impl Storage for SftpStorage {
             }
         });
 
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-
         Ok(StreamResponse {
-            stream: Box::new(stream),
+            stream: Box::new(tokio_stream::wrappers::ReceiverStream::new(rx)),
             total_size,
             content_range,
             content_length: read_len,
