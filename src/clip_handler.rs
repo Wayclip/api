@@ -4,6 +4,7 @@ use actix_web::{
     delete, get, http::header::ContentType, post, web, Error, HttpMessage, HttpRequest,
     HttpResponse, Responder,
 };
+use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
 use http_range::HttpRange;
@@ -244,9 +245,44 @@ pub async fn serve_clip_raw(
         match conn.get::<_, Vec<u8>>(&cache_key).await {
             Ok(cached_data) if !cached_data.is_empty() => {
                 log!([DEBUG] => "CACHE HIT: Serving clip {} from Redis.", clip_id);
+                let total_size = cached_data.len() as u64;
+                let range_header = req
+                    .headers()
+                    .get(actix_web::http::header::RANGE)
+                    .and_then(|h| h.to_str().ok());
+
+                if let Some(range_str) = range_header {
+                    if let Ok(ranges) = HttpRange::parse(range_str, total_size) {
+                        if let Some(range) = ranges.first() {
+                            let start = range.start as usize;
+                            let end =
+                                (start + range.length as usize - 1).min(cached_data.len() - 1);
+                            let content_length = (end - start + 1) as u64;
+
+                            let body = Bytes::copy_from_slice(&cached_data[start..=end]);
+                            let content_range = format!("bytes {}-{}/{}", start, end, total_size);
+
+                            return HttpResponse::PartialContent()
+                                .content_type("video/mp4")
+                                .insert_header((
+                                    actix_web::http::header::CONTENT_LENGTH,
+                                    content_length,
+                                ))
+                                .insert_header((
+                                    actix_web::http::header::CONTENT_RANGE,
+                                    content_range,
+                                ))
+                                .insert_header((actix_web::http::header::ACCEPT_RANGES, "bytes"))
+                                .body(body);
+                        }
+                    }
+                }
+
                 return HttpResponse::Ok()
                     .content_type("video/mp4")
-                    .body(cached_data);
+                    .insert_header((actix_web::http::header::ACCEPT_RANGES, "bytes"))
+                    .insert_header((actix_web::http::header::CONTENT_LENGTH, total_size))
+                    .body(Bytes::from(cached_data));
             }
             _ => {
                 log!([DEBUG] => "CACHE MISS: Clip {} not in Redis. Streaming from storage.", clip_id)

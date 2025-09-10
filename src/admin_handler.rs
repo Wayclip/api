@@ -1,5 +1,5 @@
 use crate::AppState;
-use actix_web::{post, web, HttpResponse, Responder};
+use actix_web::{get, web, HttpResponse, Responder};
 use chrono::Utc;
 use uuid::Uuid;
 use wayclip_core::log;
@@ -31,7 +31,7 @@ async fn validate_and_use_token(
     }
 }
 
-#[post("/ban/{token}")]
+#[get("/ban/{token}")]
 async fn ban_user_and_ip(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
     let (clip_id, user_id) = match validate_and_use_token(*token, &data.db_pool).await {
         Ok(ids) => ids,
@@ -92,7 +92,7 @@ async fn ban_user_and_ip(token: web::Path<Uuid>, data: web::Data<AppState>) -> i
     }
 }
 
-#[post("/remove/{token}")]
+#[get("/remove/{token}")]
 async fn remove_video(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
     let (clip_id, user_id) = match validate_and_use_token(*token, &data.db_pool).await {
         Ok(ids) => ids,
