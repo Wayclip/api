@@ -1,9 +1,7 @@
 use crate::{settings::Settings, AppState};
 use actix_multipart::Multipart;
-use actix_web::{
-    delete, get, http::header::ContentType, post, web, Error, HttpMessage, HttpRequest,
-    HttpResponse, Responder,
-};
+use actix_web::http::header::{self, ContentType};
+use actix_web::{delete, get, post, web, Error, HttpMessage, HttpRequest, HttpResponse, Responder};
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
@@ -145,6 +143,7 @@ struct ClipDetails {
     avatar_url: Option<String>,
 }
 
+// serve_clip function is unchanged...
 #[get("/clip/{id}")]
 pub async fn serve_clip(
     req: HttpRequest,
@@ -237,49 +236,41 @@ pub async fn serve_clip_raw(
     data: web::Data<AppState>,
 ) -> impl Responder {
     let clip_id = *id;
-    log!([DEBUG] => "HANDLER_ENTRY: /clip/{}/raw", clip_id);
     let cache_key = format!("clip_raw:{}", clip_id);
+    let range_header = req
+        .headers()
+        .get(header::RANGE)
+        .and_then(|h| h.to_str().ok());
 
     if let Ok(mut conn) = data.redis_pool.get().await {
-        log!([DEBUG] => "CACHE: Checking for key '{}'", cache_key);
         if let Ok(cached_data) = conn.get::<_, Vec<u8>>(&cache_key).await {
             if !cached_data.is_empty() {
                 log!([DEBUG] => "CACHE HIT: Serving clip {} from Redis.", clip_id);
                 let total_size = cached_data.len() as u64;
-                let range_header = req
-                    .headers()
-                    .get(actix_web::http::header::RANGE)
-                    .and_then(|h| h.to_str().ok());
 
                 if let Some(range_str) = range_header {
                     if let Ok(ranges) = HttpRange::parse(range_str, total_size) {
                         if let Some(range) = ranges.first() {
                             let start = range.start as usize;
-                            let end =
-                                (start + range.length as usize - 1).min(cached_data.len() - 1);
-                            let content_length = (end - start + 1) as u64;
+                            let end = (range.start + range.length - 1) as usize;
                             let body = Bytes::copy_from_slice(&cached_data[start..=end]);
                             let content_range = format!("bytes {}-{}/{}", start, end, total_size);
 
                             return HttpResponse::PartialContent()
                                 .content_type("video/mp4")
-                                .insert_header((
-                                    actix_web::http::header::CONTENT_LENGTH,
-                                    content_length,
-                                ))
-                                .insert_header((
-                                    actix_web::http::header::CONTENT_RANGE,
-                                    content_range,
-                                ))
-                                .insert_header((actix_web::http::header::ACCEPT_RANGES, "bytes"))
+                                .insert_header((header::CONTENT_LENGTH, body.len()))
+                                .insert_header((header::CONTENT_RANGE, content_range))
+                                .insert_header((header::ACCEPT_RANGES, "bytes"))
                                 .body(body);
                         }
                     }
+                    return HttpResponse::RangeNotSatisfiable().finish();
                 }
+
                 return HttpResponse::Ok()
                     .content_type("video/mp4")
-                    .insert_header((actix_web::http::header::ACCEPT_RANGES, "bytes"))
-                    .insert_header((actix_web::http::header::CONTENT_LENGTH, total_size))
+                    .insert_header((header::ACCEPT_RANGES, "bytes"))
+                    .insert_header((header::CONTENT_LENGTH, total_size))
                     .body(Bytes::from(cached_data));
             }
         }
@@ -297,16 +288,11 @@ pub async fn serve_clip_raw(
         Err(_) => return HttpResponse::NotFound().finish(),
     };
 
-    let range_header = req
-        .headers()
-        .get(actix_web::http::header::RANGE)
-        .and_then(|h| h.to_str().ok());
-
     let range_tuple = match range_header {
         Some(range_str) => match HttpRange::parse(range_str, clip.file_size as u64) {
             Ok(ranges) if !ranges.is_empty() => {
                 let r = ranges[0];
-                Some((r.start, Some(r.start + r.length - 1)))
+                Some((r.start, r.length))
             }
             _ => return HttpResponse::RangeNotSatisfiable().finish(),
         },
@@ -327,21 +313,15 @@ pub async fn serve_clip_raw(
 
             builder
                 .content_type("video/mp4")
-                .insert_header((actix_web::http::header::ACCEPT_RANGES, "bytes"))
-                .insert_header((
-                    actix_web::http::header::CONTENT_LENGTH,
-                    stream_response.content_length,
-                ))
-                .insert_header((
-                    actix_web::http::header::CONTENT_RANGE,
-                    stream_response.content_range,
-                ));
+                .insert_header((header::ACCEPT_RANGES, "bytes"))
+                .insert_header((header::CONTENT_LENGTH, stream_response.content_length))
+                .insert_header((header::CONTENT_RANGE, stream_response.content_range));
 
             builder.streaming(stream_response.stream)
         }
         Err(e) => {
             log!([DEBUG] => "ERROR: Failed to create download stream for clip {}: {:?}", clip_id, e);
-            HttpResponse::InternalServerError().body("Failed to retrieve clip from storage.")
+            HttpResponse::InternalServerError().finish()
         }
     }
 }
