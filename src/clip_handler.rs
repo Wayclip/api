@@ -242,8 +242,8 @@ pub async fn serve_clip_raw(
 
     if let Ok(mut conn) = data.redis_pool.get().await {
         log!([DEBUG] => "CACHE: Checking for key '{}'", cache_key);
-        match conn.get::<_, Vec<u8>>(&cache_key).await {
-            Ok(cached_data) if !cached_data.is_empty() => {
+        if let Ok(cached_data) = conn.get::<_, Vec<u8>>(&cache_key).await {
+            if !cached_data.is_empty() {
                 log!([DEBUG] => "CACHE HIT: Serving clip {} from Redis.", clip_id);
                 let total_size = cached_data.len() as u64;
                 let range_header = req
@@ -258,7 +258,6 @@ pub async fn serve_clip_raw(
                             let end =
                                 (start + range.length as usize - 1).min(cached_data.len() - 1);
                             let content_length = (end - start + 1) as u64;
-
                             let body = Bytes::copy_from_slice(&cached_data[start..=end]);
                             let content_range = format!("bytes {}-{}/{}", start, end, total_size);
 
@@ -277,29 +276,23 @@ pub async fn serve_clip_raw(
                         }
                     }
                 }
-
                 return HttpResponse::Ok()
                     .content_type("video/mp4")
                     .insert_header((actix_web::http::header::ACCEPT_RANGES, "bytes"))
                     .insert_header((actix_web::http::header::CONTENT_LENGTH, total_size))
                     .body(Bytes::from(cached_data));
             }
-            _ => {
-                log!([DEBUG] => "CACHE MISS: Clip {} not in Redis. Streaming from storage.", clip_id)
-            }
         }
+        log!([DEBUG] => "CACHE MISS: Clip {} not in Redis. Streaming from storage.", clip_id);
     } else {
         log!([DEBUG] => "ERROR: Could not get Redis connection. Streaming from storage.");
     }
 
-    log!([DEBUG] => "STREAM: Fetching from storage for clip {}", clip_id);
-
-    let clip_meta: Result<Clip, _> = sqlx::query_as("SELECT * FROM clips WHERE id = $1")
+    let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
         .bind(clip_id)
         .fetch_one(&data.db_pool)
-        .await;
-
-    let clip = match clip_meta {
+        .await
+    {
         Ok(c) => c,
         Err(_) => return HttpResponse::NotFound().finish(),
     };
@@ -309,33 +302,23 @@ pub async fn serve_clip_raw(
         .get(actix_web::http::header::RANGE)
         .and_then(|h| h.to_str().ok());
 
-    let stream_response_result = match range_header {
-        Some(range_str) => {
-            log!([DEBUG] => "STREAM: Client requested range: {}", range_str);
-            match HttpRange::parse(range_str, clip.file_size as u64) {
-                Ok(ranges) => {
-                    let range = ranges.first().cloned();
-                    let range_tuple =
-                        range.map(|r| (r.start, r.length.checked_sub(1).map(|l| r.start + l)));
-                    data.storage
-                        .download_stream(&clip.public_url, range_tuple)
-                        .await
-                }
-                Err(_) => {
-                    return HttpResponse::RangeNotSatisfiable().finish();
-                }
+    let range_tuple = match range_header {
+        Some(range_str) => match HttpRange::parse(range_str, clip.file_size as u64) {
+            Ok(ranges) if !ranges.is_empty() => {
+                let r = ranges[0];
+                Some((r.start, Some(r.start + r.length - 1)))
             }
-        }
-        None => {
-            log!([DEBUG] => "STREAM: Client did not request a range. Sending full file.");
-            data.storage.download_stream(&clip.public_url, None).await
-        }
+            _ => return HttpResponse::RangeNotSatisfiable().finish(),
+        },
+        None => None,
     };
 
-    match stream_response_result {
+    match data
+        .storage
+        .download_stream(&clip.public_url, range_tuple)
+        .await
+    {
         Ok(stream_response) => {
-            log!([DEBUG] => "STREAM: Sending stream to client for clip {}", clip_id);
-
             let mut builder = if range_header.is_some() {
                 HttpResponse::PartialContent()
             } else {
@@ -414,23 +397,23 @@ pub async fn report_clip(
             log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
 
             let message = serde_json::json!({
-            "content": "🚨 New Clip Report! <@564472732071493633>",
-            "embeds": [{
-                "title": "Reported Clip Details",
-                "color": 15158332,
-                "fields": [
-                    { "name": "Uploader", "value": format!("{} (`{}`)", report.username, report.user_id), "inline": true },
-                    { "name": "Reporter IP", "value": reporter_ip, "inline": true },
-                ]
-            }],
-            "components": [{
-                "type": 1,
-                "components": [
-                    { "type": 2, "style": 5, "label": "View Clip", "url": clip_url },
-                    { "type": 2, "style": 5, "label": "Ban User & IP", "url": ban_url },
-                    { "type": 2, "style": 5, "label": "Remove Video", "url": remove_url }
-                ]
-            }]
+                "content": "🚨 New Clip Report! <@564472732071493633>",
+                "embeds": [{
+                    "title": "Reported Clip Details",
+                    "color": 15158332,
+                    "fields": [
+                        { "name": "Uploader", "value": format!("{} (`{}`)", report.username, report.user_id), "inline": true },
+                        { "name": "Reporter IP", "value": reporter_ip, "inline": true },
+                    ],
+                    "components": [{
+                        "type": 1,
+                        "components": [
+                            { "type": 2, "style": 5, "label": "View Clip", "url": clip_url },
+                            { "type": 2, "style": 5, "label": "Ban User & IP", "url": ban_url },
+                            { "type": 2, "style": 5, "label": "Remove Video", "url": remove_url }
+                        ]
+                    }]
+                }]
             });
 
             let client = reqwest::Client::new();

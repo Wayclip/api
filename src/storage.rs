@@ -166,7 +166,7 @@ impl Storage for LocalStorage {
         storage_path: &str,
         range: Option<(u64, Option<u64>)>,
     ) -> Result<StreamResponse> {
-        log!([DEBUG] => "LOCAL: Streaming file '{}'", storage_path);
+        log!([DEBUG] => "LOCAL: Streaming file '{}' with range: {:?}", storage_path, range);
         let file_path = self.storage_path.join(storage_path);
         if !file_path.starts_with(&self.storage_path) {
             return Err(anyhow!(
@@ -175,7 +175,7 @@ impl Storage for LocalStorage {
             ));
         }
 
-        let mut file = File::open(file_path).await?;
+        let mut file = File::open(&file_path).await?;
         let total_size = file.metadata().await?.len();
 
         let (start, end) = match range {
@@ -308,8 +308,10 @@ impl Storage for SftpStorage {
         range: Option<(u64, Option<u64>)>,
     ) -> Result<StreamResponse> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
-        let remote_file_path_for_stat = format!("{}/{}", remote_dir, storage_path);
+        let remote_file_path = format!("{}/{}", remote_dir, storage_path);
+
         let pool = self.pool.clone();
+        let remote_file_path_for_stat = remote_file_path.clone();
 
         let (total_size, start, read_len) =
             task::spawn_blocking(move || -> Result<(u64, u64, u64)> {
@@ -318,15 +320,15 @@ impl Storage for SftpStorage {
                 let stat = sftp.stat(Path::new(&remote_file_path_for_stat))?;
                 let total_size = stat.size.unwrap_or(0);
 
+                if total_size == 0 {
+                    return Ok((0, 0, 0));
+                }
+
                 let (start, end) = match range {
                     Some((s, Some(e))) => (s, e.min(total_size.saturating_sub(1))),
                     Some((s, None)) => (s, total_size.saturating_sub(1)),
                     None => (0, total_size.saturating_sub(1)),
                 };
-
-                if total_size == 0 {
-                    return Ok((0, 0, 0));
-                }
 
                 if start >= total_size {
                     return Err(anyhow!("Invalid range: start is beyond file size"));
@@ -342,14 +344,12 @@ impl Storage for SftpStorage {
         let pool = self.pool.clone();
         let (tx, rx) = mpsc::channel(4);
 
-        let remote_file_path_for_stream = format!("{}/{}", remote_dir, storage_path);
-
         task::spawn_blocking(move || {
             let result: Result<()> = (|| {
-                log!([DEBUG] => "SFTP STREAM: Getting connection from POOL for stream: {}", remote_file_path_for_stream);
+                log!([DEBUG] => "SFTP STREAM: Getting connection for stream: {}", remote_file_path);
                 let conn = pool.get()?;
                 let sftp = conn.sftp()?;
-                let mut remote_file = sftp.open(Path::new(&remote_file_path_for_stream))?;
+                let mut remote_file = sftp.open(Path::new(&remote_file_path))?;
 
                 remote_file.seek(SeekFrom::Start(start))?;
 
@@ -365,6 +365,7 @@ impl Storage for SftpStorage {
                                 .blocking_send(Ok(Bytes::copy_from_slice(&buffer[..n])))
                                 .is_err()
                             {
+                                log!([DEBUG] => "SFTP STREAM: Client disconnected, stopping stream.");
                                 break;
                             }
                             bytes_left_to_read -= n as u64;
@@ -392,3 +393,5 @@ impl Storage for SftpStorage {
         })
     }
 }
+
+// Im not going to pretend I didnt vibe code streaming
