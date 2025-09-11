@@ -172,10 +172,11 @@ async fn main() -> std::io::Result<()> {
                     .service(auth_handler::get_me)
                     .service(clip_handler::get_clips_index)
                     .service(clip_handler::delete_clip)
+                    .service(stripe_handler::create_checkout_session)
+                    .service(stripe_handler::stripe_webhook)
                     .service(
                         web::scope("")
                             .wrap(ratelimiter)
-                            .service(stripe_handler::create_checkout_session)
                             .service(clip_handler::share_clip),
                     ),
             )
