@@ -139,7 +139,7 @@ pub async fn stripe_webhook(
     let mut redis_conn = match state.redis_pool.get().await {
         Ok(conn) => conn,
         Err(e) => {
-            log!([DEBUG] => "ERROR: Could not get Redis connection: {:?}", e);
+            log!([DEBUG] => "ERROR: Could not get Redis connection for idempotency check: {:?}", e);
             return HttpResponse::InternalServerError().finish();
         }
     };
@@ -199,7 +199,7 @@ pub async fn stripe_webhook(
                     log!([DEBUG] => "Successfully updated user {} in database.", user_id);
                 }
                 Ok(_) => {
-                    log!([DEBUG] => "ERROR: User {} not found for update.", user_id);
+                    log!([DEBUG] => "WARN: User {} not found for update, or already updated.", user_id);
                 }
                 Err(e) => {
                     log!([DEBUG] => "ERROR: Failed to update user {} in database: {:?}", user_id, e);

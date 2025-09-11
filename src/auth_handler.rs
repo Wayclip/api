@@ -179,7 +179,7 @@ async fn github_callback(
                 .path("/")
                 .secure(true)
                 .http_only(true)
-                .same_site(SameSite::Lax)
+                .same_site(SameSite::None)
                 .finish(),
         );
         response.finish()
