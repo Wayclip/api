@@ -18,6 +18,7 @@ use std::env;
 use std::fs as std_fs;
 use std::sync::Arc;
 use std::time::Duration;
+use stripe::Client;
 use tracing_actix_web::TracingLogger;
 use wayclip_core::log;
 use wayclip_core::models::SubscriptionTier;
@@ -30,6 +31,7 @@ mod jwt;
 mod middleware;
 mod settings;
 mod storage;
+mod stripe_handler;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -71,11 +73,12 @@ async fn main() -> std::io::Result<()> {
         ClientId::new(env::var("GITHUB_CLIENT_ID").expect("Missing GITHUB_CLIENT_ID"));
     let github_client_secret =
         ClientSecret::new(env::var("GITHUB_CLIENT_SECRET").expect("Missing GITHUB_CLIENT_SECRET"));
+    let stripe_secret_key = env::var("STRIPE_SECRET_KEY").expect("Missing STRIPE_SECRET_KEY");
     let auth_url = AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap();
     let token_url =
         TokenUrl::new("https://github.com/login/oauth/access_token".to_string()).unwrap();
     let redirect_url =
-        RedirectUrl::new(format!("{}/auth/callback", redirect_uri).to_string()).unwrap();
+        RedirectUrl::new(format!("{redirect_uri}/auth/callback").to_string()).unwrap();
 
     log!([AUTH] => "OAuth2 configured with Redirect URL: {redirect_url:?}");
 
@@ -86,6 +89,8 @@ async fn main() -> std::io::Result<()> {
         Some(token_url),
     )
     .set_redirect_uri(redirect_url);
+
+    let stripe_client = Client::new(stripe_secret_key);
 
     let storage: Arc<dyn Storage> = match config.storage_type.as_str() {
         "LOCAL" => Arc::new(LocalStorage::new(&config)),
@@ -153,6 +158,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(app_settings.clone())
+            .app_data(web::Data::new(stripe_client.clone()))
             .wrap(cors)
             .wrap(TracingLogger::default())
             .service(
@@ -169,6 +175,7 @@ async fn main() -> std::io::Result<()> {
                     .service(
                         web::scope("")
                             .wrap(ratelimiter)
+                            .service(stripe_handler::create_checkout_session)
                             .service(clip_handler::share_clip),
                     ),
             )
