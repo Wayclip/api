@@ -2,17 +2,17 @@ use crate::{settings::Settings, AppState};
 use actix_multipart::Multipart;
 use actix_web::http::header::{self, ContentType};
 use actix_web::{delete, get, post, web, Error, HttpMessage, HttpRequest, HttpResponse, Responder};
-use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
 use http_range::HttpRange;
-use redis::AsyncCommands;
+use std::io;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{Clip, HostedClipInfo, User};
 
-const MAX_FILE_SIZE: usize = 1_073_741_824;
-const CACHE_TTL_SECONDS: u64 = 3600;
+const MAX_FILE_SIZE: i64 = 1_073_741_824;
 
 #[post("/share")]
 pub async fn share_clip(
@@ -43,7 +43,6 @@ pub async fn share_clip(
     }
 
     let tier_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
-
     let current_usage: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
     )
@@ -51,11 +50,10 @@ pub async fn share_clip(
     .fetch_one(&data.db_pool)
     .await
     .unwrap_or(0);
-
     log!([DEBUG] => "User '{}' storage usage: {} / {}", user.username, current_usage, tier_limit);
 
-    if let Some(item) = payload.next().await {
-        let mut field = item?;
+    if let Some(field_result) = payload.next().await {
+        let mut field = field_result?;
         let filename = field
             .content_disposition()
             .and_then(|cd| cd.get_filename())
@@ -63,35 +61,54 @@ pub async fn share_clip(
             .to_string();
         log!([DEBUG] => "Processing uploaded file: '{}'", filename);
 
-        let mut file_data = Vec::new();
-        while let Some(chunk) = field.next().await {
-            let data = chunk?;
-            if file_data.len() + data.len() > MAX_FILE_SIZE {
-                return Err(actix_web::error::ErrorPayloadTooLarge(format!(
-                    "File size cannot exceed {MAX_FILE_SIZE} bytes",
-                )));
+        let (tx, rx) = mpsc::channel(4);
+
+        actix_web::rt::spawn(async move {
+            while let Some(chunk_result) = field.next().await {
+                let sendable_result =
+                    chunk_result.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+                if tx.send(sendable_result).await.is_err() {
+                    break;
+                }
             }
-            file_data.extend_from_slice(&data);
+        });
+
+        // The receiver can be wrapped into a stream that is Send.
+        let mut sendable_stream = ReceiverStream::new(rx);
+
+        log!([DEBUG] => "Streaming file to storage backend...");
+
+        let (storage_path, file_size) =
+            match data.storage.upload(&filename, &mut sendable_stream).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log!([DEBUG] => "ERROR: Storage upload failed during stream: {:?}", e);
+                    return Err(actix_web::error::ErrorInternalServerError(
+                        "Failed to upload file.",
+                    ));
+                }
+            };
+
+        log!([DEBUG] => "File stream complete. Total size: {} bytes.", file_size);
+
+        if file_size > MAX_FILE_SIZE {
+            let _ = data.storage.delete(&storage_path).await;
+            return Err(actix_web::error::ErrorPayloadTooLarge(format!(
+                "File size cannot exceed {} bytes",
+                MAX_FILE_SIZE
+            )));
         }
 
-        let file_size = file_data.len() as i64;
-        log!([DEBUG] => "File size is {} bytes.", file_size);
         if current_usage + file_size > tier_limit {
-            log!([DEBUG] => "Storage limit exceeded for user '{}'. Rejecting upload.", user.username);
+            log!([DEBUG] => "Storage limit exceeded for user '{}'. Deleting uploaded file.", user.username);
+            if let Err(e) = data.storage.delete(&storage_path).await {
+                log!([DEBUG] => "ERROR: Failed to cleanup file after exceeding storage limit: {:?}", e);
+            }
             return Err(actix_web::error::ErrorForbidden(
                 "Storage limit exceeded for your subscription tier.",
             ));
         }
 
-        log!([DEBUG] => "Uploading file to storage backend...");
-        let storage_path = data
-            .storage
-            .upload(&filename, file_data.clone())
-            .await
-            .map_err(|e| {
-                log!([DEBUG] => "ERROR: Storage upload failed: {:?}", e);
-                actix_web::error::ErrorInternalServerError("Failed to upload file.")
-            })?;
         log!([DEBUG] => "File uploaded successfully. Storage path: '{}'", storage_path);
 
         log!([DEBUG] => "Inserting clip metadata into database...");
@@ -109,24 +126,6 @@ pub async fn share_clip(
             actix_web::error::ErrorInternalServerError("Failed to save clip metadata.")
         })?;
         log!([DEBUG] => "Clip metadata saved to DB. Clip ID: {}", new_clip.id);
-
-        let redis_pool = data.redis_pool.clone();
-        let clip_id_for_cache = new_clip.id;
-        tokio::spawn(async move {
-            log!([DEBUG] => "CACHE_WARM: Starting background cache for new clip {}", clip_id_for_cache);
-            if let Ok(mut conn) = redis_pool.get().await {
-                let cache_key = format!("clip_raw:{}", clip_id_for_cache);
-                let result: redis::RedisResult<()> =
-                    conn.set_ex(&cache_key, &file_data, CACHE_TTL_SECONDS).await;
-                if let Err(e) = result {
-                    log!([DEBUG] => "ERROR: CACHE_WARM: Redis SETEX failed for key '{}': {:?}", cache_key, e);
-                } else {
-                    log!([DEBUG] => "CACHE_WARM: Successfully cached {} bytes for clip {}.", file_data.len(), clip_id_for_cache);
-                }
-            } else {
-                log!([DEBUG] => "ERROR: CACHE_WARM: Could not get Redis connection for caching.");
-            }
-        });
 
         let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
         Ok(HttpResponse::Ok().json(serde_json::json!({ "url": response_url })))
@@ -235,48 +234,12 @@ pub async fn serve_clip_raw(
     data: web::Data<AppState>,
 ) -> impl Responder {
     let clip_id = *id;
-    let cache_key = format!("clip_raw:{}", clip_id);
     let range_header = req
         .headers()
         .get(header::RANGE)
         .and_then(|h| h.to_str().ok());
 
-    if let Ok(mut conn) = data.redis_pool.get().await {
-        if let Ok(cached_data) = conn.get::<_, Vec<u8>>(&cache_key).await {
-            if !cached_data.is_empty() {
-                log!([DEBUG] => "CACHE HIT: Serving clip {} from Redis.", clip_id);
-                let total_size = cached_data.len() as u64;
-
-                if let Some(range_str) = range_header {
-                    if let Ok(ranges) = HttpRange::parse(range_str, total_size) {
-                        if let Some(range) = ranges.first() {
-                            let start = range.start as usize;
-                            let end = (range.start + range.length - 1) as usize;
-                            let body = Bytes::copy_from_slice(&cached_data[start..=end]);
-                            let content_range = format!("bytes {}-{}/{}", start, end, total_size);
-
-                            return HttpResponse::PartialContent()
-                                .content_type("video/mp4")
-                                .insert_header((header::CONTENT_LENGTH, body.len()))
-                                .insert_header((header::CONTENT_RANGE, content_range))
-                                .insert_header((header::ACCEPT_RANGES, "bytes"))
-                                .body(body);
-                        }
-                    }
-                    return HttpResponse::RangeNotSatisfiable().finish();
-                }
-
-                return HttpResponse::Ok()
-                    .content_type("video/mp4")
-                    .insert_header((header::ACCEPT_RANGES, "bytes"))
-                    .insert_header((header::CONTENT_LENGTH, total_size))
-                    .body(Bytes::from(cached_data));
-            }
-        }
-        log!([DEBUG] => "CACHE MISS: Clip {} not in Redis. Streaming from storage.", clip_id);
-    } else {
-        log!([DEBUG] => "ERROR: Could not get Redis connection. Streaming from storage.");
-    }
+    log!([DEBUG] => "Streaming clip {} from storage.", clip_id);
 
     let clip: Clip = match sqlx::query_as("SELECT * FROM clips WHERE id = $1")
         .bind(clip_id)
@@ -504,13 +467,6 @@ pub async fn delete_clip(
     match db_result {
         Ok(result) if result.rows_affected() > 0 => {
             log!([CLEANUP] => "Successfully deleted clip {}.", clip_id);
-            if let Ok(mut conn) = data.redis_pool.get().await {
-                let cache_key = format!("clip_raw:{}", clip_id);
-                log!([CLEANUP] => "CACHE DEL: Invalidating key '{}'", cache_key);
-                let _: redis::RedisResult<()> = conn.del(cache_key).await;
-            } else {
-                log!([DEBUG] => "ERROR: Could not get Redis connection for cache invalidation.");
-            }
             HttpResponse::NoContent().finish()
         }
         Ok(_) => {
@@ -553,10 +509,6 @@ pub async fn serve_clip_oembed(
     };
 
     let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
-    let thumbnail_url = clip_details
-        .avatar_url
-        .clone()
-        .unwrap_or_else(|| format!("{}/avatars/{}", settings.public_url, clip_details.username));
     let uploader_avatar = clip_details
         .avatar_url
         .clone()

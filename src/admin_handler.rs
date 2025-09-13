@@ -1,7 +1,6 @@
 use crate::AppState;
 use actix_web::{get, web, HttpResponse, Responder};
 use chrono::Utc;
-use redis::AsyncCommands;
 use uuid::Uuid;
 use wayclip_core::log;
 
@@ -121,23 +120,10 @@ async fn remove_video(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
     {
         Ok(result) if result.rows_affected() > 0 => {
             log!([DEBUG] => "Successfully removed clip {} from DB.", clip_id);
-
-            if let Ok(mut conn) = data.redis_pool.get().await {
-                let cache_key = format!("clip_raw:{}", clip_id);
-                log!([DEBUG] => "CACHE DEL: Invalidating key '{}'", cache_key);
-                let _: redis::RedisResult<()> = conn.del(cache_key).await;
-            } else {
-                log!([DEBUG] => "ERROR: Could not get Redis connection for cache invalidation.");
-            }
-
             HttpResponse::Ok().body(format!("Clip {} has been removed.", clip_id))
         }
         Ok(_) => {
-            log!([DEBUG] => "Clip {} was already removed from DB, ensuring cache is clear.", clip_id);
-            if let Ok(mut conn) = data.redis_pool.get().await {
-                let cache_key = format!("clip_raw:{}", clip_id);
-                let _: redis::RedisResult<()> = conn.del(cache_key).await;
-            }
+            log!([DEBUG] => "Clip {} was already removed from DB.", clip_id);
             HttpResponse::Ok().body(format!("Clip {} has been removed.", clip_id))
         }
         Err(e) => {

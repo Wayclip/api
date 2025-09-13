@@ -290,7 +290,7 @@ dependencies = [
  "futures",
  "log",
  "r2d2-memcache",
- "redis 0.15.1",
+ "redis",
 ]
 
 [[package]]
@@ -1589,11 +1589,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes 1.10.1",
- "futures-core",
  "memchr",
- "pin-project-lite 0.2.16",
- "tokio 1.47.1",
- "tokio-util 0.7.16",
 ]
 
 [[package]]
@@ -2035,37 +2031,6 @@ dependencies = [
  "libc",
  "libdbus-sys",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "deadpool"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0be2b1d1d6ec8d846f05e137292d0b89133caf95ef33695424c09568bdd39b1b"
-dependencies = [
- "deadpool-runtime",
- "lazy_static",
- "num_cpus",
- "tokio 1.47.1",
-]
-
-[[package]]
-name = "deadpool-redis"
-version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0965b977f1244bc3783bb27cd79cfcff335a8341da18f79232d00504b18eb1a"
-dependencies = [
- "deadpool",
- "redis 0.32.5",
-]
-
-[[package]]
-name = "deadpool-runtime"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
-dependencies = [
- "tokio 1.47.1",
 ]
 
 [[package]]
@@ -5683,28 +5648,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redis"
-version = "0.32.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cd3650deebc68526b304898b192fa4102a4ef0b9ada24da096559cb60e0eef8"
-dependencies = [
- "bytes 1.10.1",
- "cfg-if 1.0.3",
- "combine 4.6.7",
- "futures-util",
- "itoa 1.0.15",
- "num-bigint",
- "percent-encoding",
- "pin-project-lite 0.2.16",
- "ryu",
- "sha1_smol",
- "socket2 0.6.0",
- "tokio 1.47.1",
- "tokio-util 0.7.16",
- "url",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8140,7 +8083,7 @@ dependencies = [
 
 [[package]]
 name = "wayclip-api"
-version = "0.1.35"
+version = "0.1.37"
 dependencies = [
  "actix-cors",
  "actix-extensible-rate-limit",
@@ -8157,7 +8100,6 @@ dependencies = [
  "bytes 1.10.1",
  "chrono",
  "config",
- "deadpool-redis",
  "dotenv",
  "dotenvy",
  "env_logger",
@@ -8168,7 +8110,6 @@ dependencies = [
  "lazy_static",
  "oauth2",
  "r2d2",
- "redis 0.32.5",
  "reqwest",
  "russh",
  "russh-sftp",

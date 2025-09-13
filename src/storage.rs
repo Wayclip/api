@@ -12,8 +12,7 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_util::codec::{BytesCodec, FramedRead};
@@ -108,7 +107,11 @@ impl ManageConnection for Ssh2ConnectionManager {
 
 #[async_trait]
 pub trait Storage: Send + Sync {
-    async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String>;
+    async fn upload(
+        &self,
+        file_name: &str,
+        stream: &mut (dyn Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send),
+    ) -> Result<(String, i64)>;
     async fn delete(&self, storage_path: &str) -> Result<()>;
     async fn download_stream(
         &self,
@@ -135,7 +138,11 @@ impl LocalStorage {
 
 #[async_trait]
 impl Storage for LocalStorage {
-    async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String> {
+    async fn upload(
+        &self,
+        file_name: &str,
+        stream: &mut (dyn Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send),
+    ) -> Result<(String, i64)> {
         log!([DEBUG] => "LOCAL: Uploading file '{}'", file_name);
         tokio::fs::create_dir_all(&self.storage_path).await?;
         let extension = Path::new(file_name)
@@ -144,8 +151,16 @@ impl Storage for LocalStorage {
             .unwrap_or("bin");
         let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
         let file_path = self.storage_path.join(&unique_filename);
-        tokio::fs::write(&file_path, data).await?;
-        Ok(unique_filename)
+        let mut file = File::create(&file_path).await?;
+        let mut total_bytes = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| anyhow!("Upload stream error: {}", e))?;
+            file.write_all(&chunk).await?;
+            total_bytes += chunk.len() as i64;
+        }
+        log!([DEBUG] => "LOCAL: Upload of {} bytes to '{}' complete.", total_bytes, unique_filename);
+        Ok((unique_filename, total_bytes))
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
@@ -237,7 +252,11 @@ impl SftpStorage {
 
 #[async_trait]
 impl Storage for SftpStorage {
-    async fn upload(&self, file_name: &str, data: Vec<u8>) -> Result<String> {
+    async fn upload(
+        &self,
+        file_name: &str,
+        stream: &mut (dyn Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send),
+    ) -> Result<(String, i64)> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
         let extension = Path::new(file_name)
             .extension()
@@ -247,7 +266,9 @@ impl Storage for SftpStorage {
         let remote_file_path = format!("{}/{}", remote_dir, unique_filename);
 
         let pool = self.pool.clone();
-        task::spawn_blocking(move || -> Result<()> {
+        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+
+        let uploader = task::spawn_blocking(move || -> Result<i64> {
             log!([DEBUG] => "SFTP POOL: Getting connection for upload...");
             let conn = pool.get()?;
             let sftp = conn.sftp()?;
@@ -262,13 +283,31 @@ impl Storage for SftpStorage {
                 0o644,
                 OpenType::File,
             )?;
-            remote_file.write_all(&data)?;
-            log!([DEBUG] => "SFTP POOL: Upload of {} bytes to '{}' complete.", data.len(), remote_file_path);
-            Ok(())
-        })
-        .await??;
 
-        Ok(unique_filename)
+            let mut total_bytes = 0;
+            while let Some(chunk_result) = rx.blocking_recv() {
+                match chunk_result {
+                    Ok(chunk) => {
+                        remote_file.write_all(&chunk)?;
+                        total_bytes += chunk.len() as i64;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+
+            log!([DEBUG] => "SFTP POOL: Upload of {} bytes to '{}' complete.", total_bytes, remote_file_path);
+            Ok(total_bytes)
+        });
+
+        while let Some(chunk_result) = stream.next().await {
+            if tx.send(chunk_result).await.is_err() {
+                break;
+            }
+        }
+        drop(tx);
+
+        let total_bytes = uploader.await??;
+        Ok((unique_filename, total_bytes))
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
@@ -288,7 +327,6 @@ impl Storage for SftpStorage {
         Ok(())
     }
 
-    // gang i dont know how any of this works ¯\_(ツ)_/¯
     async fn download_stream(
         &self,
         storage_path: &str,
@@ -367,5 +405,3 @@ impl Storage for SftpStorage {
         })
     }
 }
-
-// Im not going to pretend I didnt vibe code streaming

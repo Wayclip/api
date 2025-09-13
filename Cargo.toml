@@ -1,6 +1,6 @@
 [package]
 name = "wayclip-api"
-version = "0.1.36"
+version = "0.1.37"
 edition = "2021"
 
 [[bin]]
@@ -49,8 +49,6 @@ actix-ratelimit = "0.3.1"
 actix-extensible-rate-limit = "0.4.0"
 wayclip_core = "0.1.4"
 russh = { version = "0.54.3", features = ["async-trait"] }
-redis = { version = "0.32.5", features = ["tokio-comp"] }
-deadpool-redis = "0.22.0"
 russh-sftp = "2.1.1"
 ssh-key = "0.6.7"
 base64 = "0.22.1"

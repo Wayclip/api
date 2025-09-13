@@ -1,6 +1,5 @@
 use crate::AppState;
 use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
-use redis::AsyncCommands;
 use stripe::{
     CheckoutSession, Client, CreateCheckoutSession, CreateCheckoutSessionLineItems,
     CreateCheckoutSessionLineItemsPriceData, CreateCheckoutSessionLineItemsPriceDataProductData,
@@ -120,7 +119,7 @@ pub async fn stripe_webhook(
     let webhook_secret =
         std::env::var("STRIPE_WEBHOOK_SECRET").expect("Missing STRIPE_WEBHOOK_SECRET");
 
-    let payload_str = match str::from_utf8(&payload) {
+    let payload_str = match std::str::from_utf8(&payload) {
         Ok(s) => s,
         Err(e) => {
             log!([DEBUG] => "ERROR: Webhook payload was not valid UTF-8: {:?}", e);
@@ -135,33 +134,6 @@ pub async fn stripe_webhook(
             return HttpResponse::BadRequest().body(e.to_string());
         }
     };
-
-    let mut redis_conn = match state.redis_pool.get().await {
-        Ok(conn) => conn,
-        Err(e) => {
-            log!([DEBUG] => "ERROR: Could not get Redis connection for idempotency check: {:?}", e);
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
-
-    let redis_key = format!("stripe_event_id:{}", event.id);
-    let was_set: i32 = match redis_conn.set_nx(&redis_key, 1).await {
-        Ok(val) => val,
-        Err(e) => {
-            log!([DEBUG] => "ERROR: Redis SETNX failed: {:?}", e);
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
-
-    if was_set == 0 {
-        log!([DEBUG] => "Duplicate event received, already processed: {}", event.id);
-        return HttpResponse::Ok().body("Duplicate event");
-    }
-
-    let _: () = redis_conn
-        .expire(&redis_key, 60 * 60 * 24 * 3)
-        .await
-        .unwrap_or_default();
 
     if let EventObject::CheckoutSession(session) = event.data.object {
         if event.type_ == EventType::CheckoutSessionCompleted {
