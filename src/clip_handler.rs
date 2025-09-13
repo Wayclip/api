@@ -437,7 +437,7 @@ pub async fn get_clips_index(req: HttpRequest) -> impl Responder {
         log!([DEBUG] => "Fetching clip index for user ID: {}", user_id);
         let data: &web::Data<AppState> = req.app_data().unwrap();
         match sqlx::query_as::<_, HostedClipInfo>(
-            "SELECT id, file_name FROM clips WHERE user_id = $1",
+            "SELECT id, file_name, file_size, created_at FROM clips WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id)
         .fetch_all(&data.db_pool)
