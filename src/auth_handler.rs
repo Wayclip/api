@@ -110,6 +110,7 @@ async fn upsert_oauth_user(
 }
 
 fn finalize_auth(user: User, client_type: &str, final_redirect_str: &str) -> HttpResponse {
+    let cookie_domain = ".wayclip.com";
     log!([DEBUG] => "Creating JWT for user {}", user.id);
     let jwt = match jwt::create_jwt(user.id, false) {
         Ok(token) => token,
@@ -129,6 +130,7 @@ fn finalize_auth(user: User, client_type: &str, final_redirect_str: &str) -> Htt
             .cookie(
                 Cookie::build("token", jwt)
                     .path("/")
+                    .domain(cookie_domain)
                     .secure(true)
                     .http_only(true)
                     .same_site(SameSite::None)
