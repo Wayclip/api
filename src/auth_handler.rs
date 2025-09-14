@@ -86,11 +86,18 @@ async fn upsert_oauth_user(
         .bind(email)
         .fetch_optional(&mut *tx)
         .await?;
+
     let user = match user {
         Some(mut existing_user) => {
             log!([AUTH] => "User with email '{}' found. Linking {} account.", email, provider);
+
             if existing_user.deleted_at.is_some() {
-                return Err(sqlx::Error::RowNotFound);
+                log!([AUTH] => "Reactivating deleted user account for '{}'.", email);
+                existing_user.deleted_at = None;
+                sqlx::query("UPDATE users SET deleted_at = NULL WHERE id = $1")
+                    .bind(existing_user.id)
+                    .execute(&mut *tx)
+                    .await?;
             }
             if existing_user.avatar_url.is_none() {
                 existing_user.avatar_url = avatar_url.map(String::from);
@@ -114,6 +121,7 @@ async fn upsert_oauth_user(
             .await?
         }
     };
+
     sqlx::query("INSERT INTO user_credentials (user_id, provider, provider_id) VALUES ($1, $2::credential_provider, $3) ON CONFLICT (user_id, provider) DO UPDATE SET provider_id = $3").bind(user.id).bind(provider).bind(provider_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(user)
