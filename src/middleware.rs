@@ -1,4 +1,6 @@
 use crate::jwt;
+use crate::AppState;
+use actix_web::web;
 use actix_web::{
     body::BoxBody,
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
@@ -6,14 +8,15 @@ use actix_web::{
 };
 use futures_util::future::LocalBoxFuture;
 use std::future::{ready, Ready};
+use std::rc::Rc;
 use wayclip_core::log;
+use wayclip_core::models::User;
 
 pub struct Auth;
 
 impl<S> Transform<S, ServiceRequest> for Auth
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error>,
-    S::Future: 'static,
+    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error> + 'static,
 {
     type Response = ServiceResponse<BoxBody>;
     type Error = Error;
@@ -22,17 +25,19 @@ where
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ready(Ok(AuthMiddleware { service }))
+        ready(Ok(AuthMiddleware {
+            service: Rc::new(service),
+        }))
     }
 }
 
 pub struct AuthMiddleware<S> {
-    service: S,
+    service: Rc<S>,
 }
 
 impl<S> Service<ServiceRequest> for AuthMiddleware<S>
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error>,
+    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error> + 'static,
     S::Future: 'static,
 {
     type Response = ServiceResponse<BoxBody>;
@@ -63,10 +68,50 @@ where
                 log!([DEBUG] => "Found token, attempting validation.");
                 match jwt::validate_jwt(&token) {
                     Ok(claims) => {
-                        log!([AUTH] => "Token validation successful for user ID: {}", claims.sub);
-                        req.extensions_mut().insert(claims.sub);
-                        let fut = self.service.call(req);
-                        Box::pin(fut)
+                        let data = req
+                            .app_data::<web::Data<AppState>>()
+                            .expect("AppState not found")
+                            .clone();
+
+                        let svc = self.service.clone();
+
+                        Box::pin(async move {
+                            let user_opt =
+                                sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+                                    .bind(claims.sub)
+                                    .fetch_optional(&data.db_pool)
+                                    .await;
+
+                            match user_opt {
+                                Ok(Some(user)) if user.deleted_at.is_none() && !user.is_banned => {
+                                    req.extensions_mut().insert(claims.sub);
+                                    svc.call(req).await.map(|res| res.map_into_boxed_body())
+                                }
+                                Ok(Some(user)) => {
+                                    let reason = if user.deleted_at.is_some() {
+                                        "account deleted"
+                                    } else {
+                                        "banned"
+                                    };
+                                    log!([AUTH] => "Access denied for user {}: {}", claims.sub, reason);
+                                    Ok(req
+                                        .into_response(HttpResponse::Unauthorized().finish())
+                                        .map_into_boxed_body())
+                                }
+                                Ok(None) => {
+                                    log!([AUTH] => "User not found for ID: {}", claims.sub);
+                                    Ok(req
+                                        .into_response(HttpResponse::Unauthorized().finish())
+                                        .map_into_boxed_body())
+                                }
+                                Err(e) => {
+                                    log!([DEBUG] => "Database error during auth: {:?}", e);
+                                    Ok(req
+                                        .into_response(HttpResponse::InternalServerError().finish())
+                                        .map_into_boxed_body())
+                                }
+                            }
+                        })
                     }
                     Err(e) => {
                         log!([AUTH] => "Token validation failed: {:?}", e);

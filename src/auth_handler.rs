@@ -15,9 +15,8 @@ use image::Luma;
 use oauth2::reqwest::async_http_client;
 use oauth2::{AuthorizationCode, CsrfToken, Scope, TokenResponse};
 use qrcode::QrCode;
-use rand::random;
-use rand::rng;
-use rand::seq::IteratorRandom;
+use rand::prelude::*;
+use rand::{random, rng};
 use std::env;
 use totp_rs::{Algorithm, Secret, TOTP};
 use uuid::Uuid;
@@ -239,9 +238,17 @@ async fn github_callback(
     )
     .await
     {
-        Ok(u) => u,
+        Ok(u) => {
+            if u.is_banned {
+                return HttpResponse::Forbidden().body("Your account has been banned.");
+            }
+            u
+        }
         Err(e) => {
             log!([DEBUG] => "GitHub upsert failed: {:?}", e);
+            if let sqlx::Error::RowNotFound = e {
+                return HttpResponse::Forbidden().body("This account has been deleted.");
+            }
             return HttpResponse::InternalServerError().body("Database error");
         }
     };
@@ -322,9 +329,17 @@ async fn google_callback(
     )
     .await
     {
-        Ok(u) => u,
+        Ok(u) => {
+            if u.is_banned {
+                return HttpResponse::Forbidden().body("Your account has been banned.");
+            }
+            u
+        }
         Err(e) => {
             log!([DEBUG] => "Google upsert failed: {:?}", e);
+            if let sqlx::Error::RowNotFound = e {
+                return HttpResponse::Forbidden().body("This account has been deleted.");
+            }
             return HttpResponse::InternalServerError().body("Database error");
         }
     };
@@ -417,9 +432,17 @@ async fn discord_callback(
     )
     .await
     {
-        Ok(u) => u,
+        Ok(u) => {
+            if u.is_banned {
+                return HttpResponse::Forbidden().body("Your account has been banned.");
+            }
+            u
+        }
         Err(e) => {
             log!([DEBUG] => "Discord upsert failed: {:?}", e);
+            if let sqlx::Error::RowNotFound = e {
+                return HttpResponse::Forbidden().body("This account has been deleted.");
+            }
             return HttpResponse::InternalServerError().body("Database error");
         }
     };
@@ -541,15 +564,24 @@ async fn resend_verification_email(
     HttpResponse::Ok().json(serde_json::json!({ "message": "If an account with that email exists, a new verification link has been sent." }))
 }
 
+#[derive(sqlx::FromRow)]
+struct Creds {
+    id: Uuid,
+    two_factor_enabled: bool,
+    email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    is_banned: bool,
+}
+
 #[post("/login")]
 async fn login_with_password(
     payload: web::Json<PasswordLoginPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    let creds = match sqlx::query!(
-        r#"SELECT id, two_factor_enabled, email_verified_at, deleted_at FROM users WHERE email = $1"#,
-        payload.email
+    let creds = match sqlx::query_as::<_, Creds>(
+        r#"SELECT id, two_factor_enabled, email_verified_at, deleted_at, is_banned FROM users WHERE email = $1"#,
     )
+    .bind(&payload.email)
     .fetch_optional(&data.db_pool)
     .await
     .unwrap_or(None)
@@ -559,6 +591,9 @@ async fn login_with_password(
     };
     if creds.deleted_at.is_some() {
         return HttpResponse::Unauthorized().body("This account has been scheduled for deletion.");
+    }
+    if creds.is_banned {
+        return HttpResponse::Forbidden().body("Your account has been banned.");
     }
     if creds.email_verified_at.is_none() {
         return HttpResponse::Forbidden()
