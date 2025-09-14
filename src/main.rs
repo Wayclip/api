@@ -27,6 +27,7 @@ mod auth_handler;
 mod clip_handler;
 mod db;
 mod jwt;
+mod mailer;
 mod middleware;
 mod settings;
 mod storage;
@@ -35,9 +36,12 @@ mod stripe_handler;
 #[derive(Clone)]
 pub struct AppState {
     db_pool: PgPool,
-    oauth_client: BasicClient,
+    github_oauth_client: BasicClient,
+    google_oauth_client: BasicClient,
+    discord_oauth_client: BasicClient,
     storage: Arc<dyn Storage>,
     tier_limits: Arc<HashMap<SubscriptionTier, i64>>,
+    mailer: mailer::Mailer,
 }
 
 #[actix_web::main]
@@ -60,26 +64,41 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to create database pool.");
     log!([DEBUG] => "Database pool created successfully.");
 
-    let github_client_id =
-        ClientId::new(env::var("GITHUB_CLIENT_ID").expect("Missing GITHUB_CLIENT_ID"));
-    let github_client_secret =
-        ClientSecret::new(env::var("GITHUB_CLIENT_SECRET").expect("Missing GITHUB_CLIENT_SECRET"));
+    let github_oauth_client = BasicClient::new(
+        ClientId::new(env::var("GITHUB_CLIENT_ID").expect("Missing GITHUB_CLIENT_ID")),
+        Some(ClientSecret::new(
+            env::var("GITHUB_CLIENT_SECRET").expect("Missing GITHUB_CLIENT_SECRET"),
+        )),
+        AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap(),
+        Some(TokenUrl::new("https://github.com/login/oauth/access_token".to_string()).unwrap()),
+    )
+    .set_redirect_uri(RedirectUrl::new(format!("{}/auth/github/callback", redirect_uri)).unwrap());
+
+    let google_oauth_client = BasicClient::new(
+        ClientId::new(env::var("GOOGLE_CLIENT_ID").expect("Missing GOOGLE_CLIENT_ID")),
+        Some(ClientSecret::new(
+            env::var("GOOGLE_CLIENT_SECRET").expect("Missing GOOGLE_CLIENT_SECRET"),
+        )),
+        AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string()).unwrap(),
+        Some(TokenUrl::new("https://www.googleapis.com/oauth2/v4/token".to_string()).unwrap()),
+    )
+    .set_redirect_uri(RedirectUrl::new(format!("{}/auth/google/callback", redirect_uri)).unwrap());
+
+    let discord_oauth_client = BasicClient::new(
+        ClientId::new(env::var("DISCORD_CLIENT_ID").expect("Missing DISCORD_CLIENT_ID")),
+        Some(ClientSecret::new(
+            env::var("DISCORD_CLIENT_SECRET").expect("Missing DISCORD_CLIENT_SECRET"),
+        )),
+        AuthUrl::new("https://discord.com/api/oauth2/authorize".to_string()).unwrap(),
+        Some(TokenUrl::new("https://discord.com/api/oauth2/token".to_string()).unwrap()),
+    )
+    .set_redirect_uri(RedirectUrl::new(format!("{}/auth/discord/callback", redirect_uri)).unwrap());
+
     let stripe_secret_key = env::var("STRIPE_SECRET_KEY").expect("Missing STRIPE_SECRET_KEY");
-    let auth_url = AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap();
-    let token_url =
-        TokenUrl::new("https://github.com/login/oauth/access_token".to_string()).unwrap();
     let redirect_url =
         RedirectUrl::new(format!("{redirect_uri}/auth/callback").to_string()).unwrap();
 
     log!([AUTH] => "OAuth2 configured with Redirect URL: {redirect_url:?}");
-
-    let client = BasicClient::new(
-        github_client_id,
-        Some(github_client_secret),
-        auth_url,
-        Some(token_url),
-    )
-    .set_redirect_uri(redirect_url);
 
     let stripe_client = Client::new(stripe_secret_key);
 
@@ -105,9 +124,12 @@ async fn main() -> std::io::Result<()> {
 
     let app_state = AppState {
         db_pool: pool,
-        oauth_client: client,
+        github_oauth_client,
+        google_oauth_client,
+        discord_oauth_client,
         storage,
         tier_limits,
+        mailer: mailer::Mailer::new(),
     };
 
     let app_settings = web::Data::new(config.clone());
@@ -154,7 +176,15 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::scope("/auth")
                     .service(auth_handler::github_login)
-                    .service(auth_handler::github_callback),
+                    .service(auth_handler::github_callback)
+                    .service(auth_handler::google_login)
+                    .service(auth_handler::google_callback)
+                    .service(auth_handler::discord_login)
+                    .service(auth_handler::discord_callback)
+                    .service(auth_handler::register_with_password)
+                    .service(auth_handler::login_with_password)
+                    .service(auth_handler::verify_email)
+                    .service(auth_handler::resend_verification_email),
             )
             .service(
                 web::scope("/api")

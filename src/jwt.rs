@@ -10,18 +10,28 @@ pub struct Claims {
     pub sub: Uuid,
     pub exp: i64,
     pub iat: i64,
+    pub is_2fa: bool,
 }
 
-pub fn create_jwt(user_id: Uuid) -> Result<String, jsonwebtoken::errors::Error> {
-    log!([AUTH] => "Creating new JWT for user ID: {}", user_id);
+pub fn create_jwt(
+    user_id: Uuid,
+    is_2fa_token: bool,
+) -> Result<String, jsonwebtoken::errors::Error> {
+    log!([AUTH] => "Creating new JWT for user ID: {}. 2FA temp: {}", user_id, is_2fa_token);
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let now = Utc::now();
-    let expiration = now + Duration::days(7);
+
+    let expiration = if is_2fa_token {
+        now + Duration::minutes(5)
+    } else {
+        now + Duration::days(7)
+    };
 
     let claims = Claims {
         sub: user_id,
         exp: expiration.timestamp(),
         iat: now.timestamp(),
+        is_2fa: is_2fa_token,
     };
 
     encode(
