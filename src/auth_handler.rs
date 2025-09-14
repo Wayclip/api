@@ -1,7 +1,7 @@
 use crate::{jwt, AppState};
 use actix_web::{
     cookie::{Cookie, SameSite},
-    get,
+    delete, get,
     http::header::LOCATION,
     post, web, HttpMessage, HttpRequest, HttpResponse, Responder,
 };
@@ -66,6 +66,11 @@ pub struct TwoFactorAuthPayload {
     code: String,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ProviderPath {
+    provider: String,
+}
+
 async fn upsert_oauth_user(
     db: &sqlx::PgPool,
     provider: &str,
@@ -82,6 +87,9 @@ async fn upsert_oauth_user(
     let user = match user {
         Some(mut existing_user) => {
             log!([AUTH] => "User with email '{}' found. Linking {} account.", email, provider);
+            if existing_user.deleted_at.is_some() {
+                return Err(sqlx::Error::RowNotFound);
+            }
             if existing_user.avatar_url.is_none() {
                 existing_user.avatar_url = avatar_url.map(String::from);
                 sqlx::query("UPDATE users SET avatar_url = $1 WHERE id = $2")
@@ -536,7 +544,7 @@ async fn login_with_password(
     data: web::Data<AppState>,
 ) -> impl Responder {
     let creds = match sqlx::query!(
-        r#"SELECT id, two_factor_enabled, email_verified_at FROM users WHERE email = $1"#,
+        r#"SELECT id, two_factor_enabled, email_verified_at, deleted_at FROM users WHERE email = $1"#,
         payload.email
     )
     .fetch_optional(&data.db_pool)
@@ -546,6 +554,9 @@ async fn login_with_password(
         Some(c) => c,
         None => return HttpResponse::Unauthorized().body("Invalid credentials."),
     };
+    if creds.deleted_at.is_some() {
+        return HttpResponse::Unauthorized().body("This account has been scheduled for deletion.");
+    }
     if creds.email_verified_at.is_none() {
         return HttpResponse::Forbidden()
             .body("Please verify your email address before logging in.");
@@ -763,4 +774,78 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
         clip_count: stats.clip_count.unwrap_or(0),
     };
     HttpResponse::Ok().json(user_profile)
+}
+
+#[delete("/oauth/unlink/{provider}")]
+async fn unlink_oauth_provider(
+    req: HttpRequest,
+    path: web::Path<ProviderPath>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let user_id = match req.extensions().get::<Uuid>() {
+        Some(id) => *id,
+        None => return HttpResponse::Unauthorized().finish(),
+    };
+
+    let provider_to_unlink = path.provider.to_lowercase();
+    if !["github", "google", "discord", "email"].contains(&provider_to_unlink.as_str()) {
+        return HttpResponse::BadRequest().body("Invalid provider specified.");
+    }
+
+    let credentials_count: (i64,) =
+        match sqlx::query_as("SELECT COUNT(*) FROM user_credentials WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&data.db_pool)
+            .await
+        {
+            Ok(count) => count,
+            Err(_) => {
+                return HttpResponse::InternalServerError().body("Failed to check credentials.")
+            }
+        };
+
+    if credentials_count.0 <= 1 {
+        return HttpResponse::Forbidden()
+            .body("You cannot unlink your only authentication method.");
+    }
+
+    match sqlx::query("DELETE FROM user_credentials WHERE user_id = $1 AND provider = $2")
+        .bind(user_id)
+        .bind(provider_to_unlink)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(result) => {
+            if result.rows_affected() > 0 {
+                HttpResponse::Ok()
+                    .json(serde_json::json!({ "message": "Successfully unlinked provider." }))
+            } else {
+                HttpResponse::NotFound().body("This provider was not linked to your account.")
+            }
+        }
+        Err(_) => HttpResponse::InternalServerError().body("Failed to unlink provider."),
+    }
+}
+
+#[delete("/account")]
+async fn delete_account(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    let user_id = match req.extensions().get::<Uuid>() {
+        Some(id) => *id,
+        None => return HttpResponse::Unauthorized().finish(),
+    };
+
+    match sqlx::query("UPDATE users SET deleted_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(_) => {
+            log!([DEBUG] => "User {} marked for deletion.", user_id);
+            HttpResponse::Ok().json(serde_json::json!({ "message": "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support." }))
+        }
+        Err(e) => {
+            log!([DEBUG] => "Failed to mark user {} for deletion: {:?}", user_id, e);
+            HttpResponse::InternalServerError().body("Failed to schedule account deletion.")
+        }
+    }
 }

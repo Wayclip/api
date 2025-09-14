@@ -5877,9 +5877,9 @@ dependencies = [
 
 [[package]]
 name = "resolv-conf"
-version = "0.7.4"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95325155c684b1c89f7765e30bc1c42e4a6da51ca513615660cb8a62ef9a88e3"
+checksum = "6b3789b30bd25ba102de4beabd95d21ac45b69b1be7d14522bab988c526d6799"
 
 [[package]]
 name = "rfc6979"
@@ -8255,7 +8255,7 @@ dependencies = [
 
 [[package]]
 name = "wayclip-api"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "actix-cors",
  "actix-extensible-rate-limit",
@@ -8310,9 +8310,9 @@ dependencies = [
 
 [[package]]
 name = "wayclip_core"
-version = "0.1.10"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b486b017a532cd16d53973d5a48f025f021d0459e325960464f091a44cbc6a34"
+checksum = "e87f075297bb2ba69979b1b74e0bc424c092e40cb9263b048a39b3ab658e67cc"
 dependencies = [
  "anyhow",
  "ashpd",
