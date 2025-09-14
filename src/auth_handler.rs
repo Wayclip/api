@@ -741,12 +741,24 @@ async fn two_factor_authenticate(
         "".to_string(),
     )
     .unwrap();
+
     if !totp.check_current(&payload.code).unwrap_or(false) {
         return HttpResponse::Unauthorized().body("Invalid 2FA code.");
     }
 
     let jwt = jwt::create_jwt(claims.sub, false).unwrap();
-    HttpResponse::Ok().json(serde_json::json!({ "token": jwt }))
+
+    HttpResponse::Ok()
+        .cookie(
+            Cookie::build("token", jwt)
+                .path("/")
+                .domain(".wayclip.com")
+                .secure(true)
+                .http_only(true)
+                .same_site(SameSite::None)
+                .finish(),
+        )
+        .json(serde_json::json!({ "success": true, "message": "2FA validation successful" }))
 }
 
 #[get("/me")]
