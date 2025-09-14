@@ -104,7 +104,7 @@ async fn upsert_oauth_user(
             .await?
         }
     };
-    sqlx::query("INSERT INTO user_credentials (user_id, provider, provider_id) VALUES ($1, $2, $3) ON CONFLICT (user_id, provider) DO UPDATE SET provider_id = $3").bind(user.id).bind(provider).bind(provider_id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO user_credentials (user_id, provider, provider_id) VALUES ($1, $2::credential_provider, $3) ON CONFLICT (user_id, provider) DO UPDATE SET provider_id = $3").bind(user.id).bind(provider).bind(provider_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(user)
 }
