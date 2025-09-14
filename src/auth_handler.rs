@@ -92,12 +92,7 @@ async fn upsert_oauth_user(
             log!([AUTH] => "User with email '{}' found. Linking {} account.", email, provider);
 
             if existing_user.deleted_at.is_some() {
-                log!([AUTH] => "Reactivating deleted user account for '{}'.", email);
-                existing_user.deleted_at = None;
-                sqlx::query("UPDATE users SET deleted_at = NULL WHERE id = $1")
-                    .bind(existing_user.id)
-                    .execute(&mut *tx)
-                    .await?;
+                return Err(sqlx::Error::RowNotFound);
             }
             if existing_user.avatar_url.is_none() {
                 existing_user.avatar_url = avatar_url.map(String::from);
@@ -255,7 +250,8 @@ async fn github_callback(
         Err(e) => {
             log!([DEBUG] => "GitHub upsert failed: {:?}", e);
             if let sqlx::Error::RowNotFound = e {
-                return HttpResponse::Forbidden().body("This account has been deleted.");
+                let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
+                return HttpResponse::Forbidden().body(message);
             }
             return HttpResponse::InternalServerError().body("Database error");
         }
@@ -346,7 +342,8 @@ async fn google_callback(
         Err(e) => {
             log!([DEBUG] => "Google upsert failed: {:?}", e);
             if let sqlx::Error::RowNotFound = e {
-                return HttpResponse::Forbidden().body("This account has been deleted.");
+                let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
+                return HttpResponse::Forbidden().body(message);
             }
             return HttpResponse::InternalServerError().body("Database error");
         }
@@ -449,7 +446,8 @@ async fn discord_callback(
         Err(e) => {
             log!([DEBUG] => "Discord upsert failed: {:?}", e);
             if let sqlx::Error::RowNotFound = e {
-                return HttpResponse::Forbidden().body("This account has been deleted.");
+                let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
+                return HttpResponse::Forbidden().body(message);
             }
             return HttpResponse::InternalServerError().body("Database error");
         }
@@ -598,7 +596,8 @@ async fn login_with_password(
         None => return HttpResponse::Unauthorized().body("Invalid credentials."),
     };
     if creds.deleted_at.is_some() {
-        return HttpResponse::Unauthorized().body("This account has been scheduled for deletion.");
+        let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
+        return HttpResponse::Forbidden().body(message);
     }
     if creds.is_banned {
         return HttpResponse::Forbidden().body("Your account has been banned.");
@@ -879,11 +878,13 @@ async fn unlink_oauth_provider(
             .body("You cannot unlink your only authentication method.");
     }
 
-    match sqlx::query("DELETE FROM user_credentials WHERE user_id = $1 AND provider = $2")
-        .bind(user_id)
-        .bind(provider_to_unlink)
-        .execute(&data.db_pool)
-        .await
+    match sqlx::query(
+        "DELETE FROM user_credentials WHERE user_id = $1 AND provider = $2::credential_provider",
+    )
+    .bind(user_id)
+    .bind(provider_to_unlink)
+    .execute(&data.db_pool)
+    .await
     {
         Ok(result) => {
             if result.rows_affected() > 0 {
@@ -893,7 +894,10 @@ async fn unlink_oauth_provider(
                 HttpResponse::NotFound().body("This provider was not linked to your account.")
             }
         }
-        Err(_) => HttpResponse::InternalServerError().body("Failed to unlink provider."),
+        Err(e) => {
+            log!([DEBUG] => "Failed to unlink provider: {:?}", e);
+            HttpResponse::InternalServerError().body("Failed to unlink provider.")
+        }
     }
 }
 
