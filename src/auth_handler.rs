@@ -18,10 +18,13 @@ use rand::random;
 use rand::rng;
 use rand::seq::IteratorRandom;
 use std::env;
+use std::time::Duration;
 use totp_rs::{Algorithm, Secret, TOTP};
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{DiscordUser, GitHubUser, GoogleUser, User, UserProfile};
+use wayclip_core::models::{
+    CredentialProvider, DiscordUser, GitHubUser, GoogleUser, User, UserProfile,
+};
 
 #[derive(serde::Deserialize)]
 pub struct AuthLoginQuery {
@@ -766,12 +769,24 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
         Ok(s) => s,
         Err(_) => return HttpResponse::InternalServerError().body("Could not fetch user stats"),
     };
+    let connected_accounts = match sqlx::query_as::<_, (CredentialProvider,)>(
+        "SELECT provider FROM user_credentials WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(providers) => providers.into_iter().map(|(p,)| p).collect(),
+        Err(_) => vec![],
+    };
+
     let storage_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
     let user_profile = UserProfile {
         user,
         storage_used: stats.total_size.unwrap_or(0),
         storage_limit,
         clip_count: stats.clip_count.unwrap_or(0),
+        connected_accounts,
     };
     HttpResponse::Ok().json(user_profile)
 }
@@ -848,4 +863,20 @@ async fn delete_account(req: HttpRequest, data: web::Data<AppState>) -> impl Res
             HttpResponse::InternalServerError().body("Failed to schedule account deletion.")
         }
     }
+}
+
+#[post("/logout")]
+async fn logout() -> impl Responder {
+    let cookie = Cookie::build("token", "")
+        .path("/")
+        .domain(".wayclip.com")
+        .expires(actix_web::cookie::time::OffsetDateTime::now_utc() - Duration::days(1))
+        .secure(true)
+        .http_only(true)
+        .same_site(SameSite::None)
+        .finish();
+
+    HttpResponse::Ok()
+        .cookie(cookie)
+        .json(serde_json::json!({ "message": "Logged out successfully." }))
 }

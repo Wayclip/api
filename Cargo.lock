@@ -3993,9 +3993,9 @@ checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "libredox"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "391290121bad3d37fbddad76d8f5d1c1c314cfc646d143d7e07a3086ddff0ce3"
+checksum = "416f7e718bdb06000964960ffa43b4335ad4012ae8b99060261aa4a8088d5ccb"
 dependencies = [
  "bitflags 2.9.4",
  "libc",
@@ -8255,7 +8255,7 @@ dependencies = [
 
 [[package]]
 name = "wayclip-api"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "actix-cors",
  "actix-extensible-rate-limit",
@@ -8310,9 +8310,9 @@ dependencies = [
 
 [[package]]
 name = "wayclip_core"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e87f075297bb2ba69979b1b74e0bc424c092e40cb9263b048a39b3ab658e67cc"
+checksum = "09b2cb0a32844252a9f26a02aad9ecc0464f93dfb5c42fbc2bef9f386c89763b"
 dependencies = [
  "anyhow",
  "ashpd",
