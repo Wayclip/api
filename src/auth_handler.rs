@@ -1,4 +1,5 @@
 use crate::{jwt, AppState};
+use actix_web::cookie::time::Duration;
 use actix_web::{
     cookie::{Cookie, SameSite},
     delete, get,
@@ -18,7 +19,6 @@ use rand::random;
 use rand::rng;
 use rand::seq::IteratorRandom;
 use std::env;
-use std::time::Duration;
 use totp_rs::{Algorithm, Secret, TOTP};
 use uuid::Uuid;
 use wayclip_core::log;
