@@ -184,22 +184,28 @@ async fn main() -> std::io::Result<()> {
                     .service(auth_handler::register_with_password)
                     .service(auth_handler::login_with_password)
                     .service(auth_handler::verify_email)
-                    .service(auth_handler::resend_verification_email),
+                    .service(auth_handler::resend_verification_email)
+                    .service(auth_handler::logout)
+                    .service(auth_handler::two_factor_authenticate),
             )
             .service(
                 web::scope("/api")
                     .wrap(middleware::Auth)
-                    .service(auth_handler::get_me)
                     .service(clip_handler::get_clips_index)
                     .service(clip_handler::delete_clip)
+                    .service(auth_handler::get_me)
+                    .service(auth_handler::delete_account)
+                    .service(auth_handler::unlink_oauth_provider)
+                    .service(auth_handler::two_factor_setup)
+                    .service(auth_handler::two_factor_verify)
                     .service(stripe_handler::create_checkout_session)
-                    .service(stripe_handler::stripe_webhook)
                     .service(
                         web::scope("")
                             .wrap(ratelimiter)
                             .service(clip_handler::share_clip),
                     ),
             )
+            .service(stripe_handler::stripe_webhook)
             .service(
                 web::scope("/admin")
                     .service(admin_handler::ban_user_and_ip)
