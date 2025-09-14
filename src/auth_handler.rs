@@ -570,7 +570,16 @@ async fn login_with_password(
         HttpResponse::Ok().json(serde_json::json!({ "2fa_required": true, "2fa_token": temp_jwt }))
     } else {
         let jwt = jwt::create_jwt(creds.id, false).unwrap();
-        HttpResponse::Ok().json(serde_json::json!({ "token": jwt }))
+        HttpResponse::Ok()
+            .cookie(
+                Cookie::build("token", jwt)
+                    .path("/")
+                    .secure(true)
+                    .http_only(true)
+                    .same_site(SameSite::None)
+                    .finish(),
+            )
+            .json(serde_json::json!({ "success": true, "message": "Login successful" }))
     }
 }
 
