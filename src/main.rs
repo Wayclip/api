@@ -199,6 +199,8 @@ async fn main() -> std::io::Result<()> {
                     .service(auth_handler::two_factor_setup)
                     .service(auth_handler::two_factor_verify)
                     .service(stripe_handler::create_checkout_session)
+                    .service(stripe_handler::create_customer_portal_session)
+                    .service(stripe_handler::cancel_subscription)
                     .service(
                         web::scope("")
                             .wrap(ratelimiter)

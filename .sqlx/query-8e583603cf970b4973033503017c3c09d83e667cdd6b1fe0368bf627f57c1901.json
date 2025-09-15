@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE users SET tier = $1, stripe_customer_id = $2 WHERE id = $3",
+  "query": "UPDATE users SET tier = $1 WHERE id = $2",
   "describe": {
     "columns": [],
     "parameters": {
@@ -18,11 +18,10 @@
             }
           }
         },
-        "Varchar",
         "Uuid"
       ]
     },
     "nullable": []
   },
-  "hash": "4b422cdf9da840f25b718ad4c8dc26b86af04301427986ccd4b21297e7cad1d5"
+  "hash": "8e583603cf970b4973033503017c3c09d83e667cdd6b1fe0368bf627f57c1901"
 }
