@@ -8259,7 +8259,7 @@ dependencies = [
 
 [[package]]
 name = "wayclip-api"
-version = "0.1.52"
+version = "0.1.53"
 dependencies = [
  "actix-cors",
  "actix-extensible-rate-limit",

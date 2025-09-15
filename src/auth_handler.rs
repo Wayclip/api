@@ -732,7 +732,12 @@ async fn two_factor_verify(
 
     for _ in 0..10 {
         let code: String = (0..10)
-            .map(|_| "0123456789".chars().choose(&mut rng()).unwrap())
+            .map(|_| {
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                    .chars()
+                    .choose(&mut rng())
+                    .unwrap()
+            })
             .collect();
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
