@@ -184,6 +184,8 @@ async fn main() -> std::io::Result<()> {
                     .service(auth_handler::register_with_password)
                     .service(auth_handler::login_with_password)
                     .service(auth_handler::verify_email)
+                    .service(auth_handler::forgot_password)
+                    .service(auth_handler::reset_password)
                     .service(auth_handler::resend_verification_email)
                     .service(auth_handler::logout)
                     .service(auth_handler::two_factor_authenticate),

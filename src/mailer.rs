@@ -51,4 +51,29 @@ impl Mailer {
 
         Ok(())
     }
+
+    pub fn send_password_reset_email(
+        &self,
+        to: &str,
+        username: &str,
+        token: &uuid::Uuid,
+    ) -> Result<(), lettre::transport::smtp::Error> {
+        let frontend_url =
+            env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        let reset_link = format!("{}/reset-password?token={}", frontend_url, token);
+
+        let email = Message::builder()
+            .from(self.from_address.parse().unwrap())
+            .to(to.parse().unwrap())
+            .subject("Wayclip Password Reset Request")
+            .body(format!(
+                "Hello {},\n\nYou requested a password reset. Click the link below to reset your password:\n\n{}\n\nThis link will expire in 1 hour. If you did not request a password reset, please ignore this email.\n\nThanks,\nThe Wayclip Team",
+                username, reset_link
+            ))
+            .unwrap();
+
+        self.mailer.send(&email)?;
+
+        Ok(())
+    }
 }

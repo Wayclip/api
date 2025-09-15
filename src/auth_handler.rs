@@ -73,6 +73,17 @@ pub struct ProviderPath {
     provider: String,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ForgotPasswordPayload {
+    email: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ResetPasswordPayload {
+    token: Uuid,
+    password: String,
+}
+
 async fn upsert_oauth_user(
     db: &sqlx::PgPool,
     provider: &str,
@@ -641,6 +652,97 @@ async fn login_with_password(
     }
 }
 
+#[post("/forgot-password")]
+async fn forgot_password(
+    payload: web::Json<ForgotPasswordPayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
+        .bind(&payload.email)
+        .fetch_optional(&data.db_pool)
+        .await
+        .unwrap()
+    {
+        Some(u) => u,
+        None => {
+            return HttpResponse::Ok().json(serde_json::json!({
+                "message": "If an account with that email exists, a password reset link has been sent."
+            }));
+        }
+    };
+
+    let mut tx = data.db_pool.begin().await.unwrap();
+    let token = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')",
+    )
+    .bind(token)
+    .bind(user.id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    if let Err(e) =
+        data.mailer
+            .send_password_reset_email(user.email.as_ref().unwrap(), &user.username, &token)
+    {
+        log!([DEBUG] => "Failed to send password reset email: {:?}", e);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "If an account with that email exists, a password reset link has been sent."
+    }))
+}
+
+#[post("/reset-password")]
+async fn reset_password(
+    payload: web::Json<ResetPasswordPayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let mut tx = data.db_pool.begin().await.unwrap();
+
+    let record = match sqlx::query!(
+        "SELECT user_id FROM password_reset_tokens WHERE token = $1 AND expires_at > NOW()",
+        payload.token
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .unwrap()
+    {
+        Some(r) => r,
+        None => return HttpResponse::BadRequest().body("Invalid or expired password reset token."),
+    };
+
+    let salt = SaltString::generate(&mut OsRng);
+    let password_hash = Argon2::default()
+        .hash_password(payload.password.as_bytes(), &salt)
+        .unwrap()
+        .to_string();
+
+    sqlx::query!(
+        "UPDATE user_credentials SET password_hash = $1 WHERE user_id = $2 AND provider = 'email'",
+        password_hash,
+        record.user_id
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    sqlx::query!(
+        "DELETE FROM password_reset_tokens WHERE user_id = $1",
+        record.user_id
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    tx.commit().await.unwrap();
+
+    HttpResponse::Ok()
+        .json(serde_json::json!({ "message": "Password has been reset successfully." }))
+}
+
 #[post("/2fa/setup")]
 async fn two_factor_setup(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     let user_id = req.extensions().get::<Uuid>().cloned().unwrap();
@@ -767,16 +869,19 @@ async fn two_factor_authenticate(
         _ => return HttpResponse::Unauthorized().body("Invalid or expired 2FA token."),
     };
 
-    let secret =
-        match sqlx::query_scalar::<_, String>("SELECT two_factor_secret FROM users WHERE id = $1")
-            .bind(claims.sub)
-            .fetch_one(&data.db_pool)
-            .await
-            .ok()
-        {
-            Some(s) => s,
-            None => return HttpResponse::NotFound().body("User not found."),
-        };
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(claims.sub)
+        .fetch_one(&data.db_pool)
+        .await
+    {
+        Ok(u) => u,
+        Err(_) => return HttpResponse::NotFound().body("User not found."),
+    };
+
+    let secret = match user.two_factor_secret {
+        Some(s) => s,
+        None => return HttpResponse::BadRequest().body("2FA is not enabled for this user."),
+    };
 
     let totp = TOTP::new(
         Algorithm::SHA1,
@@ -789,23 +894,62 @@ async fn two_factor_authenticate(
     )
     .unwrap();
 
-    if !totp.check_current(&payload.code).unwrap_or(false) {
-        return HttpResponse::Unauthorized().body("Invalid 2FA code.");
+    if totp.check_current(&payload.code).unwrap_or(false) {
+        let jwt = jwt::create_jwt(claims.sub, false).unwrap();
+        return HttpResponse::Ok()
+            .cookie(
+                Cookie::build("token", jwt)
+                    .path("/")
+                    .domain(".wayclip.com")
+                    .secure(true)
+                    .http_only(true)
+                    .same_site(SameSite::None)
+                    .finish(),
+            )
+            .json(serde_json::json!({ "success": true, "message": "2FA validation successful" }));
     }
 
-    let jwt = jwt::create_jwt(claims.sub, false).unwrap();
+    let recovery_codes = sqlx::query_as::<_, (String,)>(
+        "SELECT code_hash FROM user_recovery_codes WHERE user_id = $1",
+    )
+    .bind(claims.sub)
+    .fetch_all(&data.db_pool)
+    .await
+    .unwrap_or_default();
 
-    HttpResponse::Ok()
-        .cookie(
-            Cookie::build("token", jwt)
-                .path("/")
-                .domain(".wayclip.com")
-                .secure(true)
-                .http_only(true)
-                .same_site(SameSite::None)
-                .finish(),
-        )
-        .json(serde_json::json!({ "success": true, "message": "2FA validation successful" }))
+    for (code_hash,) in recovery_codes {
+        if Argon2::default()
+            .verify_password(
+                payload.code.as_bytes(),
+                &PasswordHash::new(&code_hash).unwrap(),
+            )
+            .is_ok()
+        {
+            sqlx::query("DELETE FROM user_recovery_codes WHERE user_id = $1 AND code_hash = $2")
+                .bind(claims.sub)
+                .bind(code_hash)
+                .execute(&data.db_pool)
+                .await
+                .ok();
+
+            let jwt = jwt::create_jwt(claims.sub, false).unwrap();
+            return HttpResponse::Ok()
+                .cookie(
+                    Cookie::build("token", jwt)
+                        .path("/")
+                        .domain(".wayclip.com")
+                        .secure(true)
+                        .http_only(true)
+                        .same_site(SameSite::None)
+                        .finish(),
+                )
+                .json(
+                    serde_json::json!({ "success": true, "message": "2FA validation successful with recovery code." }),
+                );
+        }
+    }
+
+    HttpResponse::Unauthorized().body("Invalid 2FA code or recovery code.")
 }
 
 #[get("/me")]

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_credentials SET password_hash = $1 WHERE user_id = $2 AND provider = 'email'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "388c6a517b06822bccc8b48a674c42d49bb4368d2e90969380b3284bdb4f8789"
+}
