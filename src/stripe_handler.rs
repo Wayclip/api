@@ -1,5 +1,6 @@
 use crate::AppState;
-use actix_web::{delete, post, web, HttpRequest, HttpResponse, Responder};
+use crate::HashMap;
+use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
 use chrono::DateTime;
 use stripe::{
     BillingPortalSession, CheckoutSession, Client, CreateBillingPortalSession,
@@ -63,7 +64,9 @@ pub async fn create_checkout_session(
     let user_id = &user.id.to_string();
 
     let mut session_params = CreateCheckoutSession {
-        success_url: Some("https://dash.wayclip.com/payment/verify?session_id={CHECKOUT_SESSION_ID}"),
+        success_url: Some(
+            "https://dash.wayclip.com/payment/verify?session_id={CHECKOUT_SESSION_ID}",
+        ),
         cancel_url: Some("https://dash.wayclip.com/payment/cancel"),
         client_reference_id: Some(user_id),
         payment_method_types: Some(vec![CreateCheckoutSessionPaymentMethodTypes::Card]),
@@ -421,5 +424,37 @@ async fn handle_subscription_deleted(state: &web::Data<AppState>, sub: StripeSub
         log!([DEBUG] => "ERROR: Failed to downgrade user tier for sub {}: {:?}", stripe_sub_id, e);
     } else {
         log!([DEBUG] => "Successfully processed subscription deletion {} for user {}", stripe_sub_id, user_id);
+    }
+}
+
+#[get("/checkout/verify-session")]
+pub async fn verify_checkout_session(
+    stripe_client: web::Data<Client>,
+    user_id: web::ReqData<Uuid>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    let session_id = match query.get("session_id") {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json("Missing session_id"),
+    };
+
+    let session = match CheckoutSession::retrieve(&stripe_client, &session_id.parse().unwrap(), &[])
+        .await
+    {
+        Ok(s) => s,
+        Err(_) => return HttpResponse::InternalServerError().json("Failed to retrieve session"),
+    };
+
+    if let Some(client_ref_id) = &session.client_reference_id {
+        if *client_ref_id != user_id.into_inner().to_string() {
+            return HttpResponse::Forbidden()
+                .json("Session does not belong to the authenticated user");
+        }
+    }
+
+    if session.payment_status == stripe::CheckoutSessionPaymentStatus::Paid {
+        HttpResponse::Ok().json(serde_json::json!({ "status": "paid" }))
+    } else {
+        HttpResponse::Ok().json(serde_json::json!({ "status": session.status }))
     }
 }
