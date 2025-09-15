@@ -230,12 +230,18 @@ async fn handle_checkout_session_completed(
     stripe_client: &Client,
     session: CheckoutSession,
 ) {
-    let user_id: Uuid = session
+    let user_id: Uuid = match session
         .client_reference_id
         .as_ref()
         .expect("client_reference_id missing")
         .parse()
-        .expect("Failed to parse UUID from client_reference_id");
+    {
+        Ok(id) => id,
+        Err(_) => {
+            log!([DEBUG] => "ERROR: Failed to parse UUID from client_reference_id");
+            return;
+        }
+    };
 
     let stripe_sub_id = match session.subscription {
         Some(Expandable::Id(id)) => id,
@@ -272,7 +278,13 @@ async fn handle_checkout_session_completed(
 
     let tier = tier_from_price_id(&price_id).unwrap_or(SubscriptionTier::Free);
 
-    let mut tx = state.db_pool.begin().await.unwrap();
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            log!([DEBUG] => "ERROR: Failed to begin database transaction: {:?}", e);
+            return;
+        }
+    };
 
     if let Err(e) = sqlx::query("UPDATE users SET tier = $1, stripe_customer_id = $2 WHERE id = $3")
         .bind(tier as SubscriptionTier)
@@ -317,7 +329,10 @@ async fn handle_checkout_session_completed(
         return;
     }
 
-    tx.commit().await.unwrap();
+    if let Err(e) = tx.commit().await {
+        log!([DEBUG] => "ERROR: Failed to commit transaction for user {}: {:?}", user_id, e);
+        return;
+    }
     log!([DEBUG] => "Successfully processed checkout for user {}", user_id);
 }
 
@@ -430,6 +445,7 @@ async fn handle_subscription_deleted(state: &web::Data<AppState>, sub: StripeSub
 #[get("/checkout/verify-session")]
 pub async fn verify_checkout_session(
     stripe_client: web::Data<Client>,
+    state: web::Data<AppState>,
     user_id: web::ReqData<Uuid>,
     query: web::Query<HashMap<String, String>>,
 ) -> impl Responder {
@@ -453,6 +469,9 @@ pub async fn verify_checkout_session(
     }
 
     if session.payment_status == stripe::CheckoutSessionPaymentStatus::Paid {
+        log!([DEBUG] => "Verifying paid session {}. Running completion handler as a fallback.", session_id);
+        handle_checkout_session_completed(&state, &stripe_client, session.clone()).await;
+
         HttpResponse::Ok().json(serde_json::json!({ "status": "paid" }))
     } else {
         HttpResponse::Ok().json(serde_json::json!({ "status": session.status }))
