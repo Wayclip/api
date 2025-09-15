@@ -63,8 +63,8 @@ pub async fn create_checkout_session(
     let user_id = &user.id.to_string();
 
     let mut session_params = CreateCheckoutSession {
-        success_url: Some("https://wayclip.com/payment/success?session_id={CHECKOUT_SESSION_ID}"),
-        cancel_url: Some("https://wayclip.com/payment/cancel"),
+        success_url: Some("https://dash.wayclip.com/payment/verify?session_id={CHECKOUT_SESSION_ID}"),
+        cancel_url: Some("https://dash.wayclip.com/payment/cancel"),
         client_reference_id: Some(user_id),
         payment_method_types: Some(vec![CreateCheckoutSessionPaymentMethodTypes::Card]),
         mode: Some(stripe::CheckoutSessionMode::Subscription),
