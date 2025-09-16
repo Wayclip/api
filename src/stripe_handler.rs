@@ -18,9 +18,9 @@ fn tier_from_price_id(price_id: &str) -> Option<SubscriptionTier> {
     let pro_id = std::env::var("STRIPE_PRICE_ID_PRO").ok()?;
 
     match price_id {
-        p if p == basic_id => Some(SubscriptionTier::Tier1),
-        p if p == plus_id => Some(SubscriptionTier::Tier2),
-        p if p == pro_id => Some(SubscriptionTier::Tier3),
+        p if p == &basic_id => Some(SubscriptionTier::Tier1),
+        p if p == &plus_id => Some(SubscriptionTier::Tier2),
+        p if p == &pro_id => Some(SubscriptionTier::Tier3),
         _ => {
             log!([DEBUG] => "ERROR: Unrecognized Stripe Price ID: {}", price_id);
             None
@@ -82,13 +82,7 @@ pub async fn create_checkout_session(
         ..Default::default()
     };
 
-    if let Some(stripe_customer_id) = &user.stripe_customer_id {
-        if let Ok(id) = stripe_customer_id.parse() {
-            session_params.customer = Some(id);
-        }
-    } else {
-        session_params.customer_email = user.email.as_deref();
-    }
+    session_params.customer_email = user.email.as_deref();
 
     let session = match CheckoutSession::create(&stripe_client, session_params).await {
         Ok(s) => s,
