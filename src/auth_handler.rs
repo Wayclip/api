@@ -472,11 +472,19 @@ async fn register_with_password(
     data: web::Data<AppState>,
 ) -> impl Responder {
     let salt = SaltString::generate(&mut OsRng);
-    let password_hash = Argon2::default()
-        .hash_password(payload.password.as_bytes(), &salt)
-        .unwrap()
-        .to_string();
-    let mut tx = data.db_pool.begin().await.unwrap();
+    let password_hash = match Argon2::default().hash_password(payload.password.as_bytes(), &salt) {
+        Ok(hash) => hash.to_string(),
+        Err(e) => {
+            log!([DEBUG] => "Password hashing failed: {:?}", e);
+            return HttpResponse::InternalServerError().body("Could not process registration.");
+        }
+    };
+
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return HttpResponse::InternalServerError().body("Database error."),
+    };
+
     let new_user: User = match sqlx::query_as::<_, User>(
         "INSERT INTO users (username, email) VALUES ($1, $2) RETURNING *",
     )
@@ -488,17 +496,29 @@ async fn register_with_password(
         Ok(user) => user,
         Err(_) => return HttpResponse::Conflict().body("User with this email already exists."),
     };
-    sqlx::query(
+
+    if sqlx::query(
         "INSERT INTO user_credentials (user_id, provider, password_hash) VALUES ($1, 'email', $2)",
     )
     .bind(new_user.id)
     .bind(&password_hash)
     .execute(&mut *tx)
     .await
-    .unwrap();
+    .is_err()
+    {
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().body("Could not save credentials.");
+    }
+
     let verification_token = Uuid::new_v4();
-    sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(verification_token).bind(new_user.id).execute(&mut *tx).await.unwrap();
-    tx.commit().await.unwrap();
+    if sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(verification_token).bind(new_user.id).execute(&mut *tx).await.is_err() {
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().body("Could not create verification token.");
+    }
+
+    if tx.commit().await.is_err() {
+        return HttpResponse::InternalServerError().body("Database transaction failed.");
+    }
 
     if let Err(e) = data.mailer.send_verification_email(
         new_user.email.as_ref().unwrap(),
@@ -506,7 +526,6 @@ async fn register_with_password(
         &verification_token,
     ) {
         log!([DEBUG] => "Failed to send verification email: {:?}", e);
-        return HttpResponse::InternalServerError().body("Could not send verification email.");
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "message": "Registration successful. Please check your email to verify your account." }))
@@ -514,33 +533,52 @@ async fn register_with_password(
 
 #[get("/verify-email/{token}")]
 async fn verify_email(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
-    let mut tx = data.db_pool.begin().await.unwrap();
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return HttpResponse::InternalServerError().body("Database error."),
+    };
+
     let record = match sqlx::query!(
         "SELECT user_id FROM email_verification_tokens WHERE token = $1 AND expires_at > NOW()",
         *token
     )
     .fetch_optional(&mut *tx)
     .await
-    .unwrap()
     {
-        Some(r) => r,
-        None => return HttpResponse::BadRequest().body("Invalid or expired verification token."),
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return HttpResponse::BadRequest().body("Invalid or expired verification token.")
+        }
+        Err(_) => return HttpResponse::InternalServerError().body("Database error."),
     };
-    sqlx::query!(
+
+    if sqlx::query!(
         "UPDATE users SET email_verified_at = NOW() WHERE id = $1",
         record.user_id
     )
     .execute(&mut *tx)
     .await
-    .unwrap();
-    sqlx::query!(
+    .is_err()
+    {
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().body("Failed to verify email.");
+    }
+
+    if sqlx::query!(
         "DELETE FROM email_verification_tokens WHERE user_id = $1",
         record.user_id
     )
     .execute(&mut *tx)
     .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    .is_err()
+    {
+        // Not critical, but log it
+        log!([DEBUG] => "Failed to delete verification token for user {}", record.user_id);
+    }
+
+    if tx.commit().await.is_err() {
+        return HttpResponse::InternalServerError().body("Database transaction failed.");
+    }
 
     let frontend_url =
         env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
@@ -554,31 +592,54 @@ async fn resend_verification_email(
     payload: web::Json<ResendVerificationPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1").bind(&payload.email).fetch_optional(&data.db_pool).await.unwrap() {
-        Some(u) => u,
-        None => return HttpResponse::Ok().json(serde_json::json!({ "message": "If an account with that email exists, a new verification link has been sent." })),
+    let success_message = serde_json::json!({ "message": "If an account with that email exists, a new verification link has been sent." });
+
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
+        .bind(&payload.email)
+        .fetch_optional(&data.db_pool)
+        .await
+    {
+        Ok(Some(u)) => u,
+        _ => return HttpResponse::Ok().json(success_message),
     };
+
     if user.email_verified_at.is_some() {
         return HttpResponse::Ok()
             .json(serde_json::json!({ "message": "Your email is already verified." }));
     }
 
-    let mut tx = data.db_pool.begin().await.unwrap();
+    if user.deleted_at.is_some() {
+        return HttpResponse::Ok().json(success_message);
+    }
+
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return HttpResponse::InternalServerError().body("Database error."),
+    };
+
     sqlx::query!(
         "DELETE FROM email_verification_tokens WHERE user_id = $1",
         user.id
     )
     .execute(&mut *tx)
     .await
-    .unwrap();
+    .ok(); // Non-critical if it fails
+
     let token = Uuid::new_v4();
-    sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(token).bind(user.id).execute(&mut *tx).await.unwrap();
-    tx.commit().await.unwrap();
+    if sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(token).bind(user.id).execute(&mut *tx).await.is_err() {
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().body("Could not generate new token.");
+    }
+
+    if tx.commit().await.is_err() {
+        return HttpResponse::InternalServerError().body("Database transaction failed.");
+    }
 
     data.mailer
         .send_verification_email(user.email.as_ref().unwrap(), &user.username, &token)
         .ok();
-    HttpResponse::Ok().json(serde_json::json!({ "message": "If an account with that email exists, a new verification link has been sent." }))
+
+    HttpResponse::Ok().json(success_message)
 }
 
 #[derive(sqlx::FromRow)]
@@ -617,18 +678,24 @@ async fn login_with_password(
         return HttpResponse::Forbidden()
             .body("Please verify your email address before logging in.");
     }
-    let hash = sqlx::query_scalar::<_, String>(
+    let hash = match sqlx::query_scalar::<_, String>(
         "SELECT password_hash FROM user_credentials WHERE user_id = $1 AND provider = 'email'",
     )
     .bind(creds.id)
     .fetch_one(&data.db_pool)
     .await
-    .unwrap();
+    {
+        Ok(h) => h,
+        Err(_) => return HttpResponse::Unauthorized().body("Invalid credentials."),
+    };
+
+    let password_hash = match PasswordHash::new(&hash) {
+        Ok(ph) => ph,
+        Err(_) => return HttpResponse::InternalServerError().body("Error validating credentials."),
+    };
+
     if Argon2::default()
-        .verify_password(
-            payload.password.as_bytes(),
-            &PasswordHash::new(&hash).unwrap(),
-        )
+        .verify_password(payload.password.as_bytes(), &password_hash)
         .is_err()
     {
         return HttpResponse::Unauthorized().body("Invalid credentials.");
@@ -657,31 +724,41 @@ async fn forgot_password(
     payload: web::Json<ForgotPasswordPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    let success_message = serde_json::json!({ "message": "If an account with that email exists, a password reset link has been sent." });
+
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
         .bind(&payload.email)
         .fetch_optional(&data.db_pool)
         .await
-        .unwrap()
     {
-        Some(u) => u,
-        None => {
-            return HttpResponse::Ok().json(serde_json::json!({
-                "message": "If an account with that email exists, a password reset link has been sent."
-            }));
-        }
+        Ok(Some(u)) => u,
+        _ => return HttpResponse::Ok().json(success_message),
     };
 
-    let mut tx = data.db_pool.begin().await.unwrap();
+    if user.deleted_at.is_some() {
+        return HttpResponse::Ok().json(success_message);
+    }
+
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return HttpResponse::InternalServerError().body("Database error."),
+    };
+
     let token = Uuid::new_v4();
-    sqlx::query(
+    if sqlx::query(
         "INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')",
     )
     .bind(token)
     .bind(user.id)
     .execute(&mut *tx)
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    .await.is_err() {
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().body("Failed to generate reset token.");
+    }
+
+    if tx.commit().await.is_err() {
+        return HttpResponse::InternalServerError().body("Database transaction failed.");
+    }
 
     if let Err(e) =
         data.mailer
@@ -690,9 +767,7 @@ async fn forgot_password(
         log!([DEBUG] => "Failed to send password reset email: {:?}", e);
     }
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "message": "If an account with that email exists, a password reset link has been sent."
-    }))
+    HttpResponse::Ok().json(success_message)
 }
 
 #[post("/reset-password")]
@@ -700,7 +775,10 @@ async fn reset_password(
     payload: web::Json<ResetPasswordPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    let mut tx = data.db_pool.begin().await.unwrap();
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return HttpResponse::InternalServerError().body("Database error."),
+    };
 
     let record = match sqlx::query!(
         "SELECT user_id FROM password_reset_tokens WHERE token = $1 AND expires_at > NOW()",
@@ -708,26 +786,35 @@ async fn reset_password(
     )
     .fetch_optional(&mut *tx)
     .await
-    .unwrap()
     {
-        Some(r) => r,
-        None => return HttpResponse::BadRequest().body("Invalid or expired password reset token."),
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return HttpResponse::BadRequest().body("Invalid or expired password reset token.")
+        }
+        Err(_) => return HttpResponse::InternalServerError().body("Database error."),
     };
 
     let salt = SaltString::generate(&mut OsRng);
-    let password_hash = Argon2::default()
-        .hash_password(payload.password.as_bytes(), &salt)
-        .unwrap()
-        .to_string();
+    let password_hash = match Argon2::default().hash_password(payload.password.as_bytes(), &salt) {
+        Ok(hash) => hash.to_string(),
+        Err(e) => {
+            log!([DEBUG] => "Password hashing failed during reset: {:?}", e);
+            return HttpResponse::InternalServerError().body("Could not process password reset.");
+        }
+    };
 
-    sqlx::query!(
+    if sqlx::query!(
         "UPDATE user_credentials SET password_hash = $1 WHERE user_id = $2 AND provider = 'email'",
         password_hash,
         record.user_id
     )
     .execute(&mut *tx)
     .await
-    .unwrap();
+    .is_err()
+    {
+        tx.rollback().await.ok();
+        return HttpResponse::InternalServerError().body("Failed to update password.");
+    }
 
     sqlx::query!(
         "DELETE FROM password_reset_tokens WHERE user_id = $1",
@@ -735,9 +822,11 @@ async fn reset_password(
     )
     .execute(&mut *tx)
     .await
-    .unwrap();
+    .ok(); // Not critical if this fails
 
-    tx.commit().await.unwrap();
+    if tx.commit().await.is_err() {
+        return HttpResponse::InternalServerError().body("Database transaction failed.");
+    }
 
     HttpResponse::Ok()
         .json(serde_json::json!({ "message": "Password has been reset successfully." }))
