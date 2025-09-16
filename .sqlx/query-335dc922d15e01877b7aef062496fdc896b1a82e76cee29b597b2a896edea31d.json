@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE subscriptions\n        SET status = 'disputed',\n            updated_at = NOW()\n        WHERE stripe_subscription_id = $1\n        RETURNING user_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "335dc922d15e01877b7aef062496fdc896b1a82e76cee29b597b2a896edea31d"
+}

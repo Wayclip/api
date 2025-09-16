@@ -3,25 +3,28 @@ use crate::HashMap;
 use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
 use chrono::{DateTime, Utc};
 use stripe::{
-    BillingPortalSession, CheckoutSession, Client, CreateBillingPortalSession,
+    BillingPortalSession, Charge, CheckoutSession, Client, CreateBillingPortalSession,
     CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionPaymentMethodTypes,
-    EventObject, EventType, Expandable, Subscription as StripeSubscription, SubscriptionId,
-    Webhook,
+    EventObject, EventType, Expandable, Invoice, InvoiceId, Subscription as StripeSubscription,
+    SubscriptionId, Webhook,
 };
 use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{Subscription, SubscriptionStatus, SubscriptionTier, User};
 
 fn tier_from_price_id(price_id: &str) -> Option<SubscriptionTier> {
-    let basic_id = std::env::var("STRIPE_PRICE_ID_BASIC").expect("Missing STRIPE_PRICE_ID_BASIC");
-    let plus_id = std::env::var("STRIPE_PRICE_ID_PLUS").expect("Missing STRIPE_PRICE_ID_PLUS");
-    let pro_id = std::env::var("STRIPE_PRICE_ID_PRO").expect("Missing STRIPE_PRICE_ID_PRO");
+    let basic_id = std::env::var("STRIPE_PRICE_ID_BASIC").ok()?;
+    let plus_id = std::env::var("STRIPE_PRICE_ID_PLUS").ok()?;
+    let pro_id = std::env::var("STRIPE_PRICE_ID_PRO").ok()?;
 
     match price_id {
         p if p == basic_id => Some(SubscriptionTier::Tier1),
         p if p == plus_id => Some(SubscriptionTier::Tier2),
         p if p == pro_id => Some(SubscriptionTier::Tier3),
-        _ => None,
+        _ => {
+            log!([DEBUG] => "ERROR: Unrecognized Stripe Price ID: {}", price_id);
+            None
+        }
     }
 }
 
@@ -61,14 +64,14 @@ pub async fn create_checkout_session(
         Err(_) => return HttpResponse::NotFound().json("User not found"),
     };
 
-    let user_id = &user.id.to_string();
+    let user_id_str = &user.id.to_string();
 
     let mut session_params = CreateCheckoutSession {
         success_url: Some(
             "https://dash.wayclip.com/payment/verify?session_id={CHECKOUT_SESSION_ID}",
         ),
         cancel_url: Some("https://dash.wayclip.com/payment/cancel"),
-        client_reference_id: Some(user_id),
+        client_reference_id: Some(user_id_str),
         payment_method_types: Some(vec![CreateCheckoutSessionPaymentMethodTypes::Card]),
         mode: Some(stripe::CheckoutSessionMode::Subscription),
         line_items: Some(vec![CreateCheckoutSessionLineItems {
@@ -229,6 +232,18 @@ pub async fn stripe_webhook(
                 handle_subscription_deleted(&state, sub).await;
             }
         }
+        EventType::ChargeDisputeCreated => {
+            if let EventObject::Dispute(dispute) = event.data.object {
+                if let Expandable::Object(charge) = dispute.charge {
+                    handle_charge_dispute_created(&state, &stripe_client, *charge).await;
+                }
+            }
+        }
+        EventType::InvoicePaymentFailed => {
+            if let EventObject::Invoice(invoice) = event.data.object {
+                handle_invoice_payment_failed(&state, invoice).await;
+            }
+        }
         _ => {
             log!([DEBUG] => "Received unhandled Stripe event type: {:?}", event.type_);
         }
@@ -242,7 +257,11 @@ async fn handle_checkout_session_completed(
     stripe_client: &Client,
     session: CheckoutSession,
 ) {
-    let user_id: Uuid = match session.client_reference_id.as_ref().and_then(|id| id.parse().ok()) {
+    let user_id: Uuid = match session
+        .client_reference_id
+        .as_ref()
+        .and_then(|id| id.parse().ok())
+    {
         Some(id) => id,
         None => {
             log!([DEBUG] => "ERROR: Failed to parse UUID from client_reference_id or it was missing");
@@ -272,7 +291,12 @@ async fn handle_checkout_session_completed(
         Expandable::Object(customer) => customer.id.to_string(),
     };
 
-    let price_id = match subscription.items.data.first().and_then(|item| item.price.as_ref()) {
+    let price_id = match subscription
+        .items
+        .data
+        .first()
+        .and_then(|item| item.price.as_ref())
+    {
         Some(price) => price.id.to_string(),
         None => {
             log!([DEBUG] => "ERROR: Price object missing from subscription item for sub {}", stripe_sub_id);
@@ -280,7 +304,13 @@ async fn handle_checkout_session_completed(
         }
     };
 
-    let tier = tier_from_price_id(&price_id).unwrap_or(SubscriptionTier::Free);
+    let tier = match tier_from_price_id(&price_id) {
+        Some(t) => t,
+        None => {
+            log!([DEBUG] => "ERROR: Could not map price ID {} to a tier for sub {}", price_id, stripe_sub_id);
+            return;
+        }
+    };
 
     let mut tx = match state.db_pool.begin().await {
         Ok(tx) => tx,
@@ -301,10 +331,10 @@ async fn handle_checkout_session_completed(
         tx.rollback().await.ok();
         return;
     }
-    
+
     let (start_date, end_date) = (
         DateTime::from_timestamp(subscription.current_period_start, 0),
-        DateTime::from_timestamp(subscription.current_period_end, 0)
+        DateTime::from_timestamp(subscription.current_period_end, 0),
     );
 
     if start_date.is_none() || end_date.is_none() {
@@ -313,7 +343,11 @@ async fn handle_checkout_session_completed(
         return;
     }
 
-    let status: SubscriptionStatus = subscription.status.to_string().parse().unwrap_or(SubscriptionStatus::Incomplete);
+    let status: SubscriptionStatus = subscription
+        .status
+        .to_string()
+        .parse()
+        .unwrap_or(SubscriptionStatus::Incomplete);
     let query_result = sqlx::query!(
         r#"
         INSERT INTO subscriptions (user_id, stripe_subscription_id, stripe_price_id, status, current_period_start, current_period_end)
@@ -353,7 +387,11 @@ async fn handle_checkout_session_completed(
 
 async fn handle_subscription_updated(state: &web::Data<AppState>, sub: StripeSubscription) {
     let stripe_sub_id = sub.id.to_string();
-    let status: SubscriptionStatus = sub.status.to_string().parse().unwrap_or(SubscriptionStatus::Incomplete);
+    let status: SubscriptionStatus = sub
+        .status
+        .to_string()
+        .parse()
+        .unwrap_or(SubscriptionStatus::Incomplete);
 
     let price_id = match sub.items.data.first().and_then(|item| item.price.as_ref()) {
         Some(price) => price.id.to_string(),
@@ -427,7 +465,9 @@ async fn handle_subscription_updated(state: &web::Data<AppState>, sub: StripeSub
 
 async fn handle_subscription_deleted(state: &web::Data<AppState>, sub: StripeSubscription) {
     let stripe_sub_id = sub.id.to_string();
-    let canceled_at: Option<DateTime<Utc>> = sub.canceled_at.and_then(|ts| DateTime::from_timestamp(ts, 0));
+    let canceled_at: Option<DateTime<Utc>> = sub
+        .canceled_at
+        .and_then(|ts| DateTime::from_timestamp(ts, 0));
 
     let query_result = sqlx::query!(
         r#"
@@ -462,6 +502,92 @@ async fn handle_subscription_deleted(state: &web::Data<AppState>, sub: StripeSub
     }
 }
 
+async fn handle_charge_dispute_created(
+    state: &web::Data<AppState>,
+    stripe_client: &Client,
+    charge: Charge,
+) {
+    let invoice_id: InvoiceId = match charge.invoice {
+        Some(Expandable::Id(id)) => id,
+        _ => {
+            log!([DEBUG] => "Dispute created for a charge ({}) that is not linked to an invoice.", charge.id);
+            return;
+        }
+    };
+
+    let invoice = match Invoice::retrieve(stripe_client, &invoice_id, &[]).await {
+        Ok(inv) => inv,
+        Err(e) => {
+            log!([DEBUG] => "ERROR: Could not retrieve invoice {} for disputed charge {}: {:?}", invoice_id, charge.id, e);
+            return;
+        }
+    };
+
+    let stripe_sub_id = match invoice.subscription {
+        Some(Expandable::Id(id)) => id.to_string(),
+        _ => {
+            log!([DEBUG] => "Dispute created for an invoice ({}) without a subscription link.", invoice.id);
+            return;
+        }
+    };
+
+    log!([DEBUG] => "Chargeback initiated for subscription: {}", stripe_sub_id);
+
+    let query_result = sqlx::query!(
+        r#"
+        UPDATE subscriptions
+        SET status = 'disputed',
+            updated_at = NOW()
+        WHERE stripe_subscription_id = $1
+        RETURNING user_id
+        "#,
+        stripe_sub_id,
+    )
+    .fetch_one(&state.db_pool)
+    .await;
+
+    let user_id = match query_result {
+        Ok(rec) => rec.user_id,
+        Err(e) => {
+            log!([DEBUG] => "ERROR: Failed to mark subscription {} as disputed: {:?}", stripe_sub_id, e);
+            return;
+        }
+    };
+
+    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'free' WHERE id = $1", user_id)
+        .execute(&state.db_pool)
+        .await
+    {
+        log!([DEBUG] => "ERROR: Failed to downgrade user tier for disputed sub {}: {:?}", stripe_sub_id, e);
+    } else {
+        log!([DEBUG] => "Successfully processed chargeback for sub {} and user {}", stripe_sub_id, user_id);
+    }
+}
+
+async fn handle_invoice_payment_failed(state: &web::Data<AppState>, invoice: Invoice) {
+    let stripe_sub_id = match invoice.subscription {
+        Some(Expandable::Id(id)) => id.to_string(),
+        _ => {
+            log!([DEBUG] => "Payment failed for an invoice ({}) without a subscription link.", invoice.id);
+            return;
+        }
+    };
+    log!([DEBUG] => "Recurring payment failed for subscription: {}", stripe_sub_id);
+    if let Err(e) = sqlx::query!(
+        r#"
+        UPDATE subscriptions
+        SET status = 'past_due', updated_at = NOW()
+        WHERE stripe_subscription_id = $1
+        "#,
+        stripe_sub_id
+    )
+    .execute(&state.db_pool)
+    .await
+    {
+        log!([DEBUG] => "ERROR: Failed to update sub {} status to past_due: {:?}", stripe_sub_id, e);
+    }
+}
+
 #[get("/checkout/verify-session")]
 pub async fn verify_checkout_session(
     stripe_client: web::Data<Client>,
@@ -479,9 +605,7 @@ pub async fn verify_checkout_session(
         Err(_) => return HttpResponse::BadRequest().json("Invalid session_id"),
     };
 
-    let session = match CheckoutSession::retrieve(&stripe_client, &session_id_parsed, &[])
-        .await
-    {
+    let session = match CheckoutSession::retrieve(&stripe_client, &session_id_parsed, &[]).await {
         Ok(s) => s,
         Err(_) => return HttpResponse::InternalServerError().json("Failed to retrieve session"),
     };

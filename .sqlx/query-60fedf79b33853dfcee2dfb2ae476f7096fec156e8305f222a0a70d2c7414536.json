@@ -18,7 +18,8 @@
                 "past_due",
                 "canceled",
                 "unpaid",
-                "incomplete"
+                "incomplete",
+                "disputed"
               ]
             }
           }
