@@ -20,6 +20,7 @@ use rand::{random, rng};
 use serde_json::json;
 use std::env;
 use totp_rs::{Algorithm, Secret, TOTP};
+use url::Url;
 use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{
@@ -165,6 +166,22 @@ fn finalize_auth(user: User, client_type: &str, final_redirect_str: &str) -> Htt
     }
 }
 
+fn handle_oauth_error(client_type: &str, message: &str) -> HttpResponse {
+    if client_type == "web" {
+        let frontend_url =
+            env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        let mut redirect_url = Url::parse(&format!("{}/login", frontend_url)).unwrap();
+        redirect_url
+            .query_pairs_mut()
+            .append_pair("error", message);
+        HttpResponse::Found()
+            .append_header((LOCATION, redirect_url.to_string()))
+            .finish()
+    } else {
+        HttpResponse::Forbidden().json(json!({ "message": message }))
+    }
+}
+
 #[get("/github")]
 async fn github_login(
     query: web::Query<AuthLoginQuery>,
@@ -255,7 +272,7 @@ async fn github_callback(
     {
         Ok(u) => {
             if u.is_banned {
-                return HttpResponse::Forbidden().json(json!({ "message": "Your account has been banned." }));
+                return handle_oauth_error(client_type, "Your account has been banned.");
             }
             u
         }
@@ -263,7 +280,7 @@ async fn github_callback(
             log!([DEBUG] => "GitHub upsert failed: {:?}", e);
             if let sqlx::Error::RowNotFound = e {
                 let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
-                return HttpResponse::Forbidden().json(json!({ "message": message }));
+                return handle_oauth_error(client_type, message);
             }
             return HttpResponse::InternalServerError().json(json!({ "message": "Database error" }));
         }
@@ -347,7 +364,7 @@ async fn google_callback(
     {
         Ok(u) => {
             if u.is_banned {
-                return HttpResponse::Forbidden().json(json!({ "message": "Your account has been banned." }));
+                return handle_oauth_error(client_type, "Your account has been banned.");
             }
             u
         }
@@ -355,7 +372,7 @@ async fn google_callback(
             log!([DEBUG] => "Google upsert failed: {:?}", e);
             if let sqlx::Error::RowNotFound = e {
                 let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
-                return HttpResponse::Forbidden().json(json!({ "message": message }));
+                return handle_oauth_error(client_type, message);
             }
             return HttpResponse::InternalServerError().json(json!({ "message": "Database error" }));
         }
@@ -451,7 +468,7 @@ async fn discord_callback(
     {
         Ok(u) => {
             if u.is_banned {
-                return HttpResponse::Forbidden().json(json!({ "message": "Your account has been banned." }));
+                return handle_oauth_error(client_type, "Your account has been banned.");
             }
             u
         }
@@ -459,7 +476,7 @@ async fn discord_callback(
             log!([DEBUG] => "Discord upsert failed: {:?}", e);
             if let sqlx::Error::RowNotFound = e {
                 let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
-                return HttpResponse::Forbidden().json(json!({ "message": message }));
+                return handle_oauth_error(client_type, message);
             }
             return HttpResponse::InternalServerError().json(json!({ "message": "Database error" }));
         }
