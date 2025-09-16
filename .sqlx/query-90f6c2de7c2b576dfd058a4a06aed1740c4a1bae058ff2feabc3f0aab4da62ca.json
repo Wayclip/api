@@ -20,7 +20,8 @@
                 "trialing",
                 "past_due",
                 "canceled",
-                "unpaid"
+                "unpaid",
+                "incomplete"
               ]
             }
           }
