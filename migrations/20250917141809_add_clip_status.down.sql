@@ -1,0 +1,2 @@
+ALTER TABLE clips
+DROP COLUMN status;

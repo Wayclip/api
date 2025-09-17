@@ -207,7 +207,8 @@ async fn main() -> std::io::Result<()> {
                     .service(
                         web::scope("")
                             .wrap(ratelimiter)
-                            .service(clip_handler::share_clip),
+                            .service(clip_handler::share_clip_begin)
+                            .service(clip_handler::share_clip_upload),
                     ),
             )
             .service(stripe_handler::stripe_webhook)

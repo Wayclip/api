@@ -15,20 +15,25 @@ use wayclip_core::models::{Clip, HostedClipInfo, User};
 
 const MAX_FILE_SIZE: i64 = 1_073_741_824;
 
-#[post("/share")]
-pub async fn share_clip(
+#[derive(serde::Deserialize)]
+pub struct ShareBeginRequest {
+    file_name: String,
+    file_size: i64,
+}
+
+#[post("/share/begin")]
+pub async fn share_clip_begin(
     req: HttpRequest,
-    mut payload: Multipart,
+    body: web::Json<ShareBeginRequest>,
     data: web::Data<AppState>,
     settings: web::Data<Settings>,
 ) -> Result<HttpResponse, Error> {
-    log!([DEBUG] => "Received clip share request.");
+    log!([DEBUG] => "Received clip share/begin request.");
     let user_id = req
         .extensions()
         .get::<Uuid>()
         .cloned()
         .ok_or_else(|| actix_web::error::ErrorUnauthorized("Not authenticated"))?;
-    log!([DEBUG] => "Share request authenticated for user ID: {}", user_id);
 
     let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(user_id)
@@ -37,7 +42,6 @@ pub async fn share_clip(
         .map_err(|_| actix_web::error::ErrorNotFound("User not found"))?;
 
     if user.is_banned {
-        log!([DEBUG] => "User '{}' is banned. Rejecting share.", user.username);
         return Err(actix_web::error::ErrorForbidden(
             "This account is suspended.",
         ));
@@ -51,68 +55,71 @@ pub async fn share_clip(
     .fetch_one(&data.db_pool)
     .await
     .unwrap_or(0);
-    log!([DEBUG] => "User '{}' storage usage: {} / {}", user.username, current_usage, tier_limit);
+
+    if body.file_size > MAX_FILE_SIZE {
+        return Err(actix_web::error::ErrorPayloadTooLarge(format!(
+            "File size cannot exceed {} bytes",
+            MAX_FILE_SIZE
+        )));
+    }
+    if current_usage + body.file_size > tier_limit {
+        return Err(actix_web::error::ErrorForbidden(
+            "Storage limit exceeded for your subscription tier.",
+        ));
+    }
+
+    let new_clip: Clip = sqlx::query_as(
+        "INSERT INTO clips (user_id, file_name, file_size, public_url, status) VALUES ($1, $2, $3, $4, 'pending') RETURNING *",
+    )
+    .bind(user_id)
+    .bind(&body.file_name)
+    .bind(body.file_size)
+    .bind(format!("{}.mp4", Uuid::new_v4()))
+    .fetch_one(&data.db_pool)
+    .await
+    .map_err(|e| {
+        log!([DEBUG] => "ERROR: DB insert for pending clip failed: {:?}", e);
+        actix_web::error::ErrorInternalServerError("Failed to initiate clip upload.")
+    })?;
+
+    let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "upload_id": new_clip.id,
+        "url": response_url
+    })))
+}
+
+#[post("/upload/{upload_id}")]
+pub async fn share_clip_upload(
+    mut payload: Multipart,
+    upload_id: web::Path<Uuid>,
+    data: web::Data<AppState>,
+) -> Result<HttpResponse, Error> {
+    let clip_id = *upload_id;
+    log!([DEBUG] => "Received file stream for upload ID: {}", clip_id);
+
+    let clip: Clip = sqlx::query_as("SELECT * FROM clips WHERE id = $1 AND status = 'pending'")
+        .bind(clip_id)
+        .fetch_one(&data.db_pool)
+        .await
+        .map_err(|_| actix_web::error::ErrorNotFound("Upload ID not found or already completed"))?;
 
     if let Some(field_result) = payload.next().await {
         let mut field = field_result?;
-        let filename = field
-            .content_disposition()
-            .and_then(|cd| cd.get_filename())
-            .unwrap_or("clip.mp4")
-            .to_string();
-        log!([DEBUG] => "Processing uploaded file: '{}'", filename);
-
         let temp_dir = Path::new("/tmp");
         tokio::fs::create_dir_all(temp_dir).await?;
-        let temp_filename = Uuid::new_v4().to_string();
-        let temp_path = temp_dir.join(&temp_filename);
+        let temp_path = temp_dir.join(&clip.public_url);
         let mut temp_file = File::create(&temp_path).await?;
-        let mut file_size: i64 = 0;
 
         while let Some(chunk_result) = field.next().await {
             let chunk = chunk_result?;
-            file_size += chunk.len() as i64;
-
-            if file_size > MAX_FILE_SIZE {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(actix_web::error::ErrorPayloadTooLarge(format!(
-                    "File size cannot exceed {} bytes",
-                    MAX_FILE_SIZE
-                )));
-            }
-            if current_usage + file_size > tier_limit {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(actix_web::error::ErrorForbidden(
-                    "Storage limit exceeded for your subscription tier.",
-                ));
-            }
-
             temp_file.write_all(&chunk).await?;
         }
-        log!([DEBUG] => "File saved locally to temp path: {:?}. Total size: {} bytes.", temp_path, file_size);
-
-        let unique_sftp_filename = format!("{}.mp4", Uuid::new_v4());
-
-        log!([DEBUG] => "Inserting clip metadata into database with final storage path: '{}'", unique_sftp_filename);
-        let new_clip: Clip = sqlx::query_as(
-            "INSERT INTO clips (user_id, file_name, file_size, public_url) VALUES ($1, $2, $3, $4) RETURNING *",
-        )
-        .bind(user_id)
-        .bind(&filename)
-        .bind(file_size)
-        .bind(&unique_sftp_filename)
-        .fetch_one(&data.db_pool)
-        .await
-        .map_err(|e| {
-            log!([DEBUG] => "ERROR: DB insert failed: {:?}", e);
-            actix_web::error::ErrorInternalServerError("Failed to save clip metadata.")
-        })?;
-        log!([DEBUG] => "Clip metadata saved to DB. Clip ID: {}", new_clip.id);
+        log!([DEBUG] => "File for {} saved to temp path: {:?}", clip_id, temp_path);
 
         let background_data = data.clone();
-        let background_storage_path = unique_sftp_filename.clone();
         actix_web::rt::spawn(async move {
-            log!([DEBUG] => "[BG] Starting background SFTP upload for temp file: {:?}", temp_path);
+            log!([DEBUG] => "[BG] Starting background SFTP upload for clip ID: {}", clip_id);
             match File::open(&temp_path).await {
                 Ok(file) => {
                     let stream = FramedRead::new(file, BytesCodec::new())
@@ -120,30 +127,35 @@ pub async fn share_clip(
 
                     if let Err(e) = background_data
                         .storage
-                        .upload(&background_storage_path, Box::new(stream))
+                        .upload(&clip.public_url, Box::new(stream))
                         .await
                     {
-                        log!([DEBUG] => "ERROR: [BG] Background SFTP upload failed: {:?}. Clip ID: {}", e, new_clip.id);
+                        log!([DEBUG] => "ERROR: [BG] SFTP upload failed for clip {}: {:?}", clip_id, e);
+                        let _ = sqlx::query("UPDATE clips SET status = 'failed' WHERE id = $1")
+                            .bind(clip_id)
+                            .execute(&background_data.db_pool)
+                            .await;
                     } else {
-                        log!([DEBUG] => "[BG] Background SFTP upload successful for clip ID: {}", new_clip.id);
+                        log!([DEBUG] => "[BG] SFTP upload successful for clip {}", clip_id);
+                        let _ = sqlx::query("UPDATE clips SET status = 'completed' WHERE id = $1")
+                            .bind(clip_id)
+                            .execute(&background_data.db_pool)
+                            .await;
                     }
                 }
                 Err(e) => {
-                    log!([DEBUG] => "ERROR: [BG] Could not open temp file for upload: {:?}", e);
+                    log!([DEBUG] => "ERROR: [BG] Could not open temp file for {}: {:?}", clip_id, e)
                 }
             }
 
             if let Err(e) = tokio::fs::remove_file(&temp_path).await {
                 log!([DEBUG] => "ERROR: [BG] Failed to delete temp file {:?}: {:?}", temp_path, e);
-            } else {
-                log!([DEBUG] => "[BG] Deleted temp file: {:?}", temp_path);
             }
         });
 
-        let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
-        Ok(HttpResponse::Ok().json(serde_json::json!({ "url": response_url })))
+        Ok(HttpResponse::Ok().finish())
     } else {
-        Err(actix_web::error::ErrorBadRequest("No file uploaded."))
+        Err(actix_web::error::ErrorBadRequest("No file in upload body."))
     }
 }
 
