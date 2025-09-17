@@ -5,9 +5,10 @@ use actix_web::{delete, get, post, web, Error, HttpMessage, HttpRequest, HttpRes
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
 use http_range::HttpRange;
-use std::io;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use std::path::Path;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
+use tokio_util::codec::{BytesCodec, FramedRead};
 use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{Clip, HostedClipInfo, User};
@@ -61,64 +62,45 @@ pub async fn share_clip(
             .to_string();
         log!([DEBUG] => "Processing uploaded file: '{}'", filename);
 
-        let (tx, rx) = mpsc::channel(4);
+        let temp_dir = Path::new("/tmp");
+        tokio::fs::create_dir_all(temp_dir).await?;
+        let temp_filename = Uuid::new_v4().to_string();
+        let temp_path = temp_dir.join(&temp_filename);
+        let mut temp_file = File::create(&temp_path).await?;
+        let mut file_size: i64 = 0;
 
-        actix_web::rt::spawn(async move {
-            while let Some(chunk_result) = field.next().await {
-                let sendable_result =
-                    chunk_result.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
-                if tx.send(sendable_result).await.is_err() {
-                    break;
-                }
+        while let Some(chunk_result) = field.next().await {
+            let chunk = chunk_result?;
+            file_size += chunk.len() as i64;
+
+            if file_size > MAX_FILE_SIZE {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(actix_web::error::ErrorPayloadTooLarge(format!(
+                    "File size cannot exceed {} bytes",
+                    MAX_FILE_SIZE
+                )));
             }
-        });
-
-        // The receiver can be wrapped into a stream that is Send.
-        let mut sendable_stream = ReceiverStream::new(rx);
-
-        log!([DEBUG] => "Streaming file to storage backend...");
-
-        let (storage_path, file_size) =
-            match data.storage.upload(&filename, &mut sendable_stream).await {
-                Ok(result) => result,
-                Err(e) => {
-                    log!([DEBUG] => "ERROR: Storage upload failed during stream: {:?}", e);
-                    return Err(actix_web::error::ErrorInternalServerError(
-                        "Failed to upload file.",
-                    ));
-                }
-            };
-
-        log!([DEBUG] => "File stream complete. Total size: {} bytes.", file_size);
-
-        if file_size > MAX_FILE_SIZE {
-            let _ = data.storage.delete(&storage_path).await;
-            return Err(actix_web::error::ErrorPayloadTooLarge(format!(
-                "File size cannot exceed {} bytes",
-                MAX_FILE_SIZE
-            )));
-        }
-
-        if current_usage + file_size > tier_limit {
-            log!([DEBUG] => "Storage limit exceeded for user '{}'. Deleting uploaded file.", user.username);
-            if let Err(e) = data.storage.delete(&storage_path).await {
-                log!([DEBUG] => "ERROR: Failed to cleanup file after exceeding storage limit: {:?}", e);
+            if current_usage + file_size > tier_limit {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(actix_web::error::ErrorForbidden(
+                    "Storage limit exceeded for your subscription tier.",
+                ));
             }
-            return Err(actix_web::error::ErrorForbidden(
-                "Storage limit exceeded for your subscription tier.",
-            ));
+
+            temp_file.write_all(&chunk).await?;
         }
+        log!([DEBUG] => "File saved locally to temp path: {:?}. Total size: {} bytes.", temp_path, file_size);
 
-        log!([DEBUG] => "File uploaded successfully. Storage path: '{}'", storage_path);
+        let unique_sftp_filename = format!("{}.mp4", Uuid::new_v4());
 
-        log!([DEBUG] => "Inserting clip metadata into database...");
+        log!([DEBUG] => "Inserting clip metadata into database with final storage path: '{}'", unique_sftp_filename);
         let new_clip: Clip = sqlx::query_as(
             "INSERT INTO clips (user_id, file_name, file_size, public_url) VALUES ($1, $2, $3, $4) RETURNING *",
         )
         .bind(user_id)
         .bind(&filename)
         .bind(file_size)
-        .bind(&storage_path)
+        .bind(&unique_sftp_filename)
         .fetch_one(&data.db_pool)
         .await
         .map_err(|e| {
@@ -126,6 +108,37 @@ pub async fn share_clip(
             actix_web::error::ErrorInternalServerError("Failed to save clip metadata.")
         })?;
         log!([DEBUG] => "Clip metadata saved to DB. Clip ID: {}", new_clip.id);
+
+        let background_data = data.clone();
+        let background_storage_path = unique_sftp_filename.clone();
+        actix_web::rt::spawn(async move {
+            log!([DEBUG] => "[BG] Starting background SFTP upload for temp file: {:?}", temp_path);
+            match File::open(&temp_path).await {
+                Ok(file) => {
+                    let stream = FramedRead::new(file, BytesCodec::new())
+                        .map(|res| res.map(|bytes| bytes.freeze()));
+
+                    if let Err(e) = background_data
+                        .storage
+                        .upload(&background_storage_path, Box::new(stream))
+                        .await
+                    {
+                        log!([DEBUG] => "ERROR: [BG] Background SFTP upload failed: {:?}. Clip ID: {}", e, new_clip.id);
+                    } else {
+                        log!([DEBUG] => "[BG] Background SFTP upload successful for clip ID: {}", new_clip.id);
+                    }
+                }
+                Err(e) => {
+                    log!([DEBUG] => "ERROR: [BG] Could not open temp file for upload: {:?}", e);
+                }
+            }
+
+            if let Err(e) = tokio::fs::remove_file(&temp_path).await {
+                log!([DEBUG] => "ERROR: [BG] Failed to delete temp file {:?}: {:?}", temp_path, e);
+            } else {
+                log!([DEBUG] => "[BG] Deleted temp file: {:?}", temp_path);
+            }
+        });
 
         let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
         Ok(HttpResponse::Ok().json(serde_json::json!({ "url": response_url })))
