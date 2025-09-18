@@ -5,10 +5,8 @@ use actix_web::{delete, get, post, web, Error, HttpMessage, HttpRequest, HttpRes
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
 use http_range::HttpRange;
-use std::path::Path;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
-use tokio_util::codec::{BytesCodec, FramedRead};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{Clip, HostedClipInfo, User};
@@ -21,7 +19,7 @@ pub struct ShareBeginRequest {
     file_size: i64,
 }
 
-#[post("/share/begin")]
+#[post("/begin")]
 pub async fn share_clip_begin(
     req: HttpRequest,
     body: web::Json<ShareBeginRequest>,
@@ -106,52 +104,49 @@ pub async fn share_clip_upload(
 
     if let Some(field_result) = payload.next().await {
         let mut field = field_result?;
-        let temp_dir = Path::new("/tmp");
-        tokio::fs::create_dir_all(temp_dir).await?;
-        let temp_path = temp_dir.join(&clip.public_url);
-        let mut temp_file = File::create(&temp_path).await?;
 
-        while let Some(chunk_result) = field.next().await {
-            let chunk = chunk_result?;
-            temp_file.write_all(&chunk).await?;
-        }
-        log!([DEBUG] => "File for {} saved to temp path: {:?}", clip_id, temp_path);
+        let (tx, rx) = mpsc::channel(4);
 
         let background_data = data.clone();
         actix_web::rt::spawn(async move {
             log!([DEBUG] => "[BG] Starting background SFTP upload for clip ID: {}", clip_id);
-            match File::open(&temp_path).await {
-                Ok(file) => {
-                    let stream = FramedRead::new(file, BytesCodec::new())
-                        .map(|res| res.map(|bytes| bytes.freeze()));
 
-                    if let Err(e) = background_data
-                        .storage
-                        .upload(&clip.public_url, Box::new(stream))
-                        .await
-                    {
-                        log!([DEBUG] => "ERROR: [BG] SFTP upload failed for clip {}: {:?}", clip_id, e);
-                        let _ = sqlx::query("UPDATE clips SET status = 'failed' WHERE id = $1")
-                            .bind(clip_id)
-                            .execute(&background_data.db_pool)
-                            .await;
-                    } else {
-                        log!([DEBUG] => "[BG] SFTP upload successful for clip {}", clip_id);
-                        let _ = sqlx::query("UPDATE clips SET status = 'completed' WHERE id = $1")
-                            .bind(clip_id)
-                            .execute(&background_data.db_pool)
-                            .await;
-                    }
-                }
-                Err(e) => {
-                    log!([DEBUG] => "ERROR: [BG] Could not open temp file for {}: {:?}", clip_id, e)
-                }
-            }
+            let stream = ReceiverStream::new(rx);
 
-            if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-                log!([DEBUG] => "ERROR: [BG] Failed to delete temp file {:?}: {:?}", temp_path, e);
+            if let Err(e) = background_data
+                .storage
+                .upload(&clip.public_url, Box::new(stream))
+                .await
+            {
+                log!([DEBUG] => "ERROR: [BG] SFTP upload failed for clip {}: {:?}", clip_id, e);
+                let _ = sqlx::query("UPDATE clips SET status = 'failed' WHERE id = $1")
+                    .bind(clip_id)
+                    .execute(&background_data.db_pool)
+                    .await;
+            } else {
+                log!([DEBUG] => "[BG] SFTP upload successful for clip {}", clip_id);
+                let _ = sqlx::query("UPDATE clips SET status = 'completed' WHERE id = $1")
+                    .bind(clip_id)
+                    .execute(&background_data.db_pool)
+                    .await;
             }
         });
+
+        while let Some(chunk_result) = field.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
+                    let _ = tx.send(Err(io_err)).await;
+                    break;
+                }
+            };
+
+            if tx.send(Ok(chunk)).await.is_err() {
+                log!([DEBUG] => "Upload channel closed prematurely for clip ID: {}. Aborting.", clip_id);
+                break;
+            }
+        }
 
         Ok(HttpResponse::Ok().finish())
     } else {

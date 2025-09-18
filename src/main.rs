@@ -205,7 +205,7 @@ async fn main() -> std::io::Result<()> {
                     .service(stripe_handler::verify_checkout_session)
                     .service(stripe_handler::cancel_subscription)
                     .service(
-                        web::scope("")
+                        web::scope("/share")
                             .wrap(ratelimiter)
                             .service(clip_handler::share_clip_begin)
                             .service(clip_handler::share_clip_upload),
