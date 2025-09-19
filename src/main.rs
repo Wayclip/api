@@ -214,8 +214,11 @@ async fn main() -> std::io::Result<()> {
             .service(stripe_handler::stripe_webhook)
             .service(
                 web::scope("/admin")
+                    .wrap(middleware::Auth)
+                    .wrap(middleware::AdminAuth)
                     .service(admin_handler::ban_user_and_ip)
-                    .service(admin_handler::remove_video),
+                    .service(admin_handler::remove_video)
+                    .service(admin_handler::get_admin_dashboard),
             )
             .service(clip_handler::serve_clip)
             .service(clip_handler::serve_clip_raw)

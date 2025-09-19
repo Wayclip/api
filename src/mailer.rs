@@ -1,6 +1,8 @@
+use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use std::env;
+use std::fs;
 
 #[derive(Clone)]
 pub struct Mailer {
@@ -28,6 +30,27 @@ impl Mailer {
         }
     }
 
+    fn read_and_populate_template(
+        &self,
+        subject: &str,
+        username: &str,
+        body_text: &str,
+        link: &str,
+        button_text: &str,
+    ) -> String {
+        let template_path = "assets/email.html";
+        let mut template =
+            fs::read_to_string(template_path).expect("Should have been able to read the file");
+
+        template = template.replace("{{subject}}", subject);
+        template = template.replace("{{username}}", username);
+        template = template.replace("{{body}}", body_text);
+        template = template.replace("{{link}}", link);
+        template = template.replace("{{button_text}}", button_text);
+
+        template
+    }
+
     pub fn send_verification_email(
         &self,
         to: &str,
@@ -37,13 +60,24 @@ impl Mailer {
         let redirect_url = env::var("REDIRECT_URL").expect("REDIRECT_URL must be set");
         let verification_link = format!("{redirect_url}/auth/verify-email/{token}");
 
+        let subject = "Welcome to Wayclip! Please Verify Your Email";
+        let body_text = "Thank you for registering with Wayclip. Please click the button below to verify your email address:";
+        let button_text = "Verify Email";
+
+        let html_body = self.read_and_populate_template(
+            subject,
+            username,
+            body_text,
+            &verification_link,
+            button_text,
+        );
+
         let email = Message::builder()
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
-            .subject("Welcome to Wayclip! Please Verify Your Email")
-            .body(format!(
-                "Hello {username},\n\nThank you for registering with Wayclip. Please click the link below to verify your email address:\n\n{verification_link}\n\nThis link will expire in 1 hour.\n\nThanks,\nThe Wayclip Team",
-            ))
+            .subject(subject)
+            .header(ContentType::TEXT_HTML)
+            .body(html_body)
             .unwrap();
 
         self.mailer.send(&email)?;
@@ -61,13 +95,20 @@ impl Mailer {
             env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
         let reset_link = format!("{frontend_url}/reset-password?token={token}");
 
+        let subject = "Wayclip Password Reset Request";
+        let body_text =
+            "You requested a password reset. Click the button below to reset your password:";
+        let button_text = "Reset Password";
+
+        let html_body =
+            self.read_and_populate_template(subject, username, body_text, &reset_link, button_text);
+
         let email = Message::builder()
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
-            .subject("Wayclip Password Reset Request")
-            .body(format!(
-                "Hello {username},\n\nYou requested a password reset. Click the link below to reset your password:\n\n{reset_link}\n\nThis link will expire in 1 hour. If you did not request a password reset, please ignore this email.\n\nThanks,\nThe Wayclip Team",
-            ))
+            .subject(subject)
+            .header(ContentType::TEXT_HTML)
+            .body(html_body)
             .unwrap();
 
         self.mailer.send(&email)?;

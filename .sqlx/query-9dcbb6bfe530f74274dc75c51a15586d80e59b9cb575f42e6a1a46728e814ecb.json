@@ -1,0 +1,84 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            u.id, u.username, u.email,\n            u.tier as \"tier: _\",\n            u.is_banned,\n            u.role as \"role: _\",\n            -- CHANGE: Cast aggregate results to BIGINT for proper mapping to i64\n            COALESCE(c.clip_count, 0)::BIGINT as \"clip_count!\",\n            COALESCE(c.total_size, 0)::BIGINT as \"data_used!\"\n        FROM users u\n        LEFT JOIN (\n            -- CHANGE: Cast aggregate results to BIGINT\n            SELECT user_id, COUNT(*)::BIGINT as clip_count, SUM(file_size)::BIGINT as total_size\n            FROM clips GROUP BY user_id\n        ) c ON u.id = c.user_id\n        ORDER BY u.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "tier: _",
+        "type_info": {
+          "Custom": {
+            "name": "subscription_tier",
+            "kind": {
+              "Enum": [
+                "free",
+                "tier1",
+                "tier2",
+                "tier3"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "is_banned",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "role: _",
+        "type_info": {
+          "Custom": {
+            "name": "user_role",
+            "kind": {
+              "Enum": [
+                "user",
+                "admin"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "clip_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "data_used!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "9dcbb6bfe530f74274dc75c51a15586d80e59b9cb575f42e6a1a46728e814ecb"
+}
