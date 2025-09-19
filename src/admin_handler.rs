@@ -48,15 +48,11 @@ async fn ban_user_and_ip(token: web::Path<Uuid>, data: web::Data<AppState>) -> i
 
     log!([DEBUG] => "Attempting to ban user {} via token for clip {}", user_id, clip_id);
 
-    let user_ip: Option<String> =
-        match sqlx::query_scalar("SELECT ip_address FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await
-        {
-            Ok(ip) => ip,
-            Err(_) => None,
-        };
+    let user_ip: Option<String> = sqlx::query_scalar("SELECT ip_address FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or_default();
 
     if let Some(ip) = user_ip {
         if let Err(e) =
@@ -82,7 +78,7 @@ async fn ban_user_and_ip(token: web::Path<Uuid>, data: web::Data<AppState>) -> i
                 return HttpResponse::InternalServerError().finish();
             }
             log!([DEBUG] => "Successfully banned user {}", user_id);
-            HttpResponse::Ok().body(format!("User {} has been banned.", user_id))
+            HttpResponse::Ok().body(format!("User {user_id} has been banned."))
         }
         Err(e) => {
             log!([DEBUG] => "ERROR: Failed to ban user {}: {:?}", user_id, e);
@@ -106,7 +102,7 @@ async fn remove_video(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
         .await
     {
         Ok(Some(clip)) => clip,
-        Ok(None) => return HttpResponse::NotFound().finish(), // Clip already deleted from DB
+        Ok(None) => return HttpResponse::NotFound().finish(),
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
 
@@ -120,11 +116,11 @@ async fn remove_video(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
     {
         Ok(result) if result.rows_affected() > 0 => {
             log!([DEBUG] => "Successfully removed clip {} from DB.", clip_id);
-            HttpResponse::Ok().body(format!("Clip {} has been removed.", clip_id))
+            HttpResponse::Ok().body(format!("Clip {clip_id} has been removed."))
         }
         Ok(_) => {
             log!([DEBUG] => "Clip {} was already removed from DB.", clip_id);
-            HttpResponse::Ok().body(format!("Clip {} has been removed.", clip_id))
+            HttpResponse::Ok().body(format!("Clip {clip_id} has been removed."))
         }
         Err(e) => {
             log!([DEBUG] => "ERROR: Failed to delete clip from DB: {:?}", e);

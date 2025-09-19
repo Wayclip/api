@@ -45,6 +45,11 @@ pub async fn share_clip_begin(
         ));
     }
 
+    let sanitized_file_name = body.file_name.trim();
+    if sanitized_file_name.is_empty() || sanitized_file_name.len() > 255 {
+        return Err(actix_web::error::ErrorBadRequest("Invalid file name."));
+    }
+
     let tier_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
     let current_usage: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
@@ -56,8 +61,7 @@ pub async fn share_clip_begin(
 
     if body.file_size > MAX_FILE_SIZE {
         return Err(actix_web::error::ErrorPayloadTooLarge(format!(
-            "File size cannot exceed {} bytes",
-            MAX_FILE_SIZE
+            "File size cannot exceed {MAX_FILE_SIZE} bytes",
         )));
     }
     if current_usage + body.file_size > tier_limit {
@@ -70,7 +74,7 @@ pub async fn share_clip_begin(
         "INSERT INTO clips (user_id, file_name, file_size, public_url, status) VALUES ($1, $2, $3, $4, 'pending') RETURNING *",
     )
     .bind(user_id)
-    .bind(&body.file_name)
+    .bind(sanitized_file_name)
     .bind(body.file_size)
     .bind(format!("{}.mp4", Uuid::new_v4()))
     .fetch_one(&data.db_pool)
@@ -131,12 +135,11 @@ pub async fn share_clip_upload(
                     .await;
             }
         });
-
         while let Some(chunk_result) = field.next().await {
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
+                    let io_err = std::io::Error::other(e.to_string());
                     let _ = tx.send(Err(io_err)).await;
                     break;
                 }
@@ -199,6 +202,9 @@ pub async fn serve_clip(
         }
     };
 
+    let escaped_file_name = html_escape::encode_text(&clip_details.file_name);
+    let escaped_username = html_escape::encode_text(&clip_details.username);
+
     let clip_url = format!("{}/clip/{}", settings.public_url, clip_details.id);
     let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
     let report_url = format!("/clip/{}/report", clip_details.id);
@@ -222,8 +228,8 @@ pub async fn serve_clip(
         log!([DEBUG] => "Bot detected ('{}'), serving meta tags.", user_agent);
         let template = include_str!("../assets/embed.html");
         template
-            .replace("{{FILE_NAME}}", &clip_details.file_name)
-            .replace("{{USERNAME}}", &clip_details.username)
+            .replace("{{FILE_NAME}}", &escaped_file_name)
+            .replace("{{USERNAME}}", &escaped_username)
             .replace("{{UPLOAD_DATE}}", &formatted_date)
             .replace("{{UPLOAD_DATE_ISO}}", &iso_date)
             .replace("{{CLIP_URL}}", &clip_url)
@@ -234,10 +240,10 @@ pub async fn serve_clip(
         log!([DEBUG] => "Regular user detected, serving video player page.");
         let template = include_str!("../assets/view.html");
         template
-            .replace("{{FILE_NAME}}", &clip_details.file_name)
+            .replace("{{FILE_NAME}}", &escaped_file_name)
             .replace("{{RAW_URL}}", &raw_url)
             .replace("{{AVATAR_URL}}", &uploader_avatar)
-            .replace("{{USERNAME}}", &clip_details.username)
+            .replace("{{USERNAME}}", &escaped_username)
             .replace("{{UPLOAD_DATE}}", &formatted_date)
             .replace("{{REPORT_URL}}", &report_url)
     };

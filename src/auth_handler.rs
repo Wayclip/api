@@ -27,6 +27,8 @@ use wayclip_core::models::{
     CredentialProvider, DiscordUser, GitHubUser, GoogleUser, User, UserProfile,
 };
 
+const MIN_PASSWORD_LENGTH: usize = 8;
+
 #[derive(serde::Deserialize)]
 pub struct AuthLoginQuery {
     client: Option<String>,
@@ -142,7 +144,8 @@ fn finalize_auth(user: User, client_type: &str, final_redirect_str: &str) -> Htt
         Ok(token) => token,
         Err(e) => {
             log!([AUTH] => "ERROR: Failed to create JWT: {:?}", e);
-            return HttpResponse::InternalServerError().json(json!({ "message": "Failed to create token" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to create token" }));
         }
     };
     if client_type == "cli" {
@@ -170,10 +173,8 @@ fn handle_oauth_error(client_type: &str, message: &str) -> HttpResponse {
     if client_type == "web" {
         let frontend_url =
             env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-        let mut redirect_url = Url::parse(&format!("{}/login", frontend_url)).unwrap();
-        redirect_url
-            .query_pairs_mut()
-            .append_pair("error", message);
+        let mut redirect_url = Url::parse(&format!("{frontend_url}/login")).unwrap();
+        redirect_url.query_pairs_mut().append_pair("error", message);
         HttpResponse::Found()
             .append_header((LOCATION, redirect_url.to_string()))
             .finish()
@@ -229,7 +230,8 @@ async fn github_callback(
         Ok(t) => t.access_token().secret().to_string(),
         Err(e) => {
             log!([DEBUG] => "GitHub token exchange failed: {:?}", e);
-            return HttpResponse::InternalServerError().json(json!({ "message": "Token exchange failed" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Token exchange failed" }));
         }
     };
     let client = reqwest::Client::new();
@@ -253,7 +255,10 @@ async fn github_callback(
         .await;
     let (gh_user, emails) = match (user_res, emails_res) {
         (Ok(u), Ok(e)) => (u, e),
-        _ => return HttpResponse::InternalServerError().json(json!({ "message": "Failed to fetch GitHub profile" })),
+        _ => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to fetch GitHub profile" }))
+        }
     };
     let email = emails
         .into_iter()
@@ -282,7 +287,8 @@ async fn github_callback(
                 let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
                 return handle_oauth_error(client_type, message);
             }
-            return HttpResponse::InternalServerError().json(json!({ "message": "Database error" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error" }));
         }
     };
     finalize_auth(user, client_type, redirect)
@@ -335,7 +341,8 @@ async fn google_callback(
         Ok(t) => t.access_token().secret().to_string(),
         Err(e) => {
             log!([DEBUG] => "Google token exchange failed: {:?}", e);
-            return HttpResponse::InternalServerError().json(json!({ "message": "Token exchange failed" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Token exchange failed" }));
         }
     };
     let google_user: GoogleUser = match reqwest::Client::new()
@@ -349,7 +356,8 @@ async fn google_callback(
     {
         Ok(u) => u,
         Err(_) => {
-            return HttpResponse::InternalServerError().json(json!({ "message": "Failed to fetch Google profile" }))
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to fetch Google profile" }))
         }
     };
     let user = match upsert_oauth_user(
@@ -374,7 +382,8 @@ async fn google_callback(
                 let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
                 return handle_oauth_error(client_type, message);
             }
-            return HttpResponse::InternalServerError().json(json!({ "message": "Database error" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error" }));
         }
     };
     finalize_auth(user, client_type, redirect)
@@ -426,7 +435,8 @@ async fn discord_callback(
         Ok(t) => t.access_token().secret().to_string(),
         Err(e) => {
             log!([DEBUG] => "Discord token exchange failed: {:?}", e);
-            return HttpResponse::InternalServerError().json(json!({ "message": "Token exchange failed" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Token exchange failed" }));
         }
     };
     let discord_user: DiscordUser = match reqwest::Client::new()
@@ -440,7 +450,8 @@ async fn discord_callback(
     {
         Ok(u) => u,
         Err(_) => {
-            return HttpResponse::InternalServerError().json(json!({ "message": "Failed to fetch Discord profile" }))
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to fetch Discord profile" }))
         }
     };
     let avatar = discord_user.avatar.map(|hash| {
@@ -452,8 +463,9 @@ async fn discord_callback(
     let email = match discord_user.email {
         Some(e) => e,
         None => {
-            return HttpResponse::BadRequest()
-                .json(json!({ "message": "A verified email is required to sign up with Discord." }))
+            return HttpResponse::BadRequest().json(
+                json!({ "message": "A verified email is required to sign up with Discord." }),
+            )
         }
     };
     let user = match upsert_oauth_user(
@@ -478,7 +490,8 @@ async fn discord_callback(
                 let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
                 return handle_oauth_error(client_type, message);
             }
-            return HttpResponse::InternalServerError().json(json!({ "message": "Database error" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error" }));
         }
     };
     finalize_auth(user, client_type, redirect)
@@ -489,18 +502,36 @@ async fn register_with_password(
     payload: web::Json<PasswordRegisterPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    if payload.password.len() < MIN_PASSWORD_LENGTH {
+        return HttpResponse::BadRequest().json(json!({ "message": format!("Password must be at least {} characters long.", MIN_PASSWORD_LENGTH) }));
+    }
+    if !validator::ValidateEmail::validate_email(&payload.email) {
+        return HttpResponse::BadRequest().json(json!({ "message": "Invalid email format." }));
+    }
+    if payload.username.len() < 3
+        || payload.username.len() > 20
+        || !payload.username.chars().all(|c| c.is_alphanumeric())
+    {
+        return HttpResponse::BadRequest()
+            .json(json!({ "message": "Username must be 3-20 alphanumeric characters." }));
+    }
+
     let salt = SaltString::generate(&mut OsRng);
     let password_hash = match Argon2::default().hash_password(payload.password.as_bytes(), &salt) {
         Ok(hash) => hash.to_string(),
         Err(e) => {
             log!([DEBUG] => "Password hashing failed: {:?}", e);
-            return HttpResponse::InternalServerError().json(json!({ "message": "Could not process registration." }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Could not process registration." }));
         }
     };
 
     let mut tx = match data.db_pool.begin().await {
         Ok(tx) => tx,
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Database error." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error." }))
+        }
     };
 
     let new_user: User = match sqlx::query_as::<_, User>(
@@ -512,7 +543,10 @@ async fn register_with_password(
     .await
     {
         Ok(user) => user,
-        Err(_) => return HttpResponse::Conflict().json(json!({ "message": "User with this email already exists." })),
+        Err(_) => {
+            return HttpResponse::Conflict()
+                .json(json!({ "message": "User with this email already exists." }))
+        }
     };
 
     if sqlx::query(
@@ -525,7 +559,8 @@ async fn register_with_password(
     .is_err()
     {
         tx.rollback().await.ok();
-        return HttpResponse::InternalServerError().json(json!({ "message": "Could not save credentials." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Could not save credentials." }));
     }
 
     let verification_token = Uuid::new_v4();
@@ -535,7 +570,8 @@ async fn register_with_password(
     }
 
     if tx.commit().await.is_err() {
-        return HttpResponse::InternalServerError().json(json!({ "message": "Database transaction failed." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Database transaction failed." }));
     }
 
     if let Err(e) = data.mailer.send_verification_email(
@@ -553,7 +589,10 @@ async fn register_with_password(
 async fn verify_email(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
     let mut tx = match data.db_pool.begin().await {
         Ok(tx) => tx,
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Database error." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error." }))
+        }
     };
 
     let record = match sqlx::query!(
@@ -565,9 +604,13 @@ async fn verify_email(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
     {
         Ok(Some(r)) => r,
         Ok(None) => {
-            return HttpResponse::BadRequest().json(json!({ "message": "Invalid or expired verification token." }))
+            return HttpResponse::BadRequest()
+                .json(json!({ "message": "Invalid or expired verification token." }))
         }
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Database error." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error." }))
+        }
     };
 
     if sqlx::query!(
@@ -579,7 +622,8 @@ async fn verify_email(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
     .is_err()
     {
         tx.rollback().await.ok();
-        return HttpResponse::InternalServerError().json(json!({ "message": "Failed to verify email." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Failed to verify email." }));
     }
 
     if sqlx::query!(
@@ -590,18 +634,18 @@ async fn verify_email(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
     .await
     .is_err()
     {
-        // Not critical, but log it
         log!([DEBUG] => "Failed to delete verification token for user {}", record.user_id);
     }
 
     if tx.commit().await.is_err() {
-        return HttpResponse::InternalServerError().json(json!({ "message": "Database transaction failed." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Database transaction failed." }));
     }
 
     let frontend_url =
         env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
     HttpResponse::Found()
-        .append_header((LOCATION, format!("{}/login?verified=true", frontend_url)))
+        .append_header((LOCATION, format!("{frontend_url}/login?verified=true")))
         .finish()
 }
 
@@ -632,7 +676,10 @@ async fn resend_verification_email(
 
     let mut tx = match data.db_pool.begin().await {
         Ok(tx) => tx,
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Database error." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error." }))
+        }
     };
 
     sqlx::query!(
@@ -650,7 +697,8 @@ async fn resend_verification_email(
     }
 
     if tx.commit().await.is_err() {
-        return HttpResponse::InternalServerError().json(json!({ "message": "Database transaction failed." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Database transaction failed." }));
     }
 
     data.mailer
@@ -690,7 +738,8 @@ async fn login_with_password(
         return HttpResponse::Forbidden().json(json!({ "message": message }));
     }
     if creds.is_banned {
-        return HttpResponse::Forbidden().json(json!({ "message": "Your account has been banned." }));
+        return HttpResponse::Forbidden()
+            .json(json!({ "message": "Your account has been banned." }));
     }
     if creds.email_verified_at.is_none() {
         return HttpResponse::Forbidden()
@@ -704,12 +753,17 @@ async fn login_with_password(
     .await
     {
         Ok(h) => h,
-        Err(_) => return HttpResponse::Unauthorized().json(json!({ "message": "Invalid credentials." })),
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(json!({ "message": "Invalid credentials." }))
+        }
     };
 
     let password_hash = match PasswordHash::new(&hash) {
         Ok(ph) => ph,
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Error validating credentials." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Error validating credentials." }))
+        }
     };
 
     if Argon2::default()
@@ -759,7 +813,10 @@ async fn forgot_password(
 
     let mut tx = match data.db_pool.begin().await {
         Ok(tx) => tx,
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Database error." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error." }))
+        }
     };
 
     let token = Uuid::new_v4();
@@ -775,7 +832,8 @@ async fn forgot_password(
     }
 
     if tx.commit().await.is_err() {
-        return HttpResponse::InternalServerError().json(json!({ "message": "Database transaction failed." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Database transaction failed." }));
     }
 
     if let Err(e) =
@@ -793,9 +851,16 @@ async fn reset_password(
     payload: web::Json<ResetPasswordPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    if payload.password.len() < MIN_PASSWORD_LENGTH {
+        return HttpResponse::BadRequest().json(json!({ "message": format!("Password must be at least {} characters long.", MIN_PASSWORD_LENGTH) }));
+    }
+
     let mut tx = match data.db_pool.begin().await {
         Ok(tx) => tx,
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Database error." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error." }))
+        }
     };
 
     let record = match sqlx::query!(
@@ -807,9 +872,13 @@ async fn reset_password(
     {
         Ok(Some(r)) => r,
         Ok(None) => {
-            return HttpResponse::BadRequest().json(json!({ "message": "Invalid or expired password reset token." }))
+            return HttpResponse::BadRequest()
+                .json(json!({ "message": "Invalid or expired password reset token." }))
         }
-        Err(_) => return HttpResponse::InternalServerError().json(json!({ "message": "Database error." })),
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Database error." }))
+        }
     };
 
     let salt = SaltString::generate(&mut OsRng);
@@ -817,7 +886,8 @@ async fn reset_password(
         Ok(hash) => hash.to_string(),
         Err(e) => {
             log!([DEBUG] => "Password hashing failed during reset: {:?}", e);
-            return HttpResponse::InternalServerError().json(json!({ "message": "Could not process password reset." }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Could not process password reset." }));
         }
     };
 
@@ -831,7 +901,8 @@ async fn reset_password(
     .is_err()
     {
         tx.rollback().await.ok();
-        return HttpResponse::InternalServerError().json(json!({ "message": "Failed to update password." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Failed to update password." }));
     }
 
     sqlx::query!(
@@ -843,7 +914,8 @@ async fn reset_password(
     .ok(); // Not critical if this fails
 
     if tx.commit().await.is_err() {
-        return HttpResponse::InternalServerError().json(json!({ "message": "Database transaction failed." }));
+        return HttpResponse::InternalServerError()
+            .json(json!({ "message": "Database transaction failed." }));
     }
 
     HttpResponse::Ok()
@@ -879,7 +951,8 @@ async fn two_factor_setup(req: HttpRequest, data: web::Data<AppState>) -> impl R
         Ok(base64) => base64,
         Err(e) => {
             log!([DEBUG] => "Failed to generate QR code: {:?}", e);
-            return HttpResponse::InternalServerError().json(json!({ "message": "Failed to generate QR code" }));
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to generate QR code" }));
         }
     };
 
@@ -973,7 +1046,10 @@ async fn two_factor_authenticate(
 ) -> impl Responder {
     let claims = match jwt::validate_jwt(&payload.two_fa_token) {
         Ok(c) if c.is_2fa => c,
-        _ => return HttpResponse::Unauthorized().json(json!({ "message": "Invalid or expired 2FA token." })),
+        _ => {
+            return HttpResponse::Unauthorized()
+                .json(json!({ "message": "Invalid or expired 2FA token." }))
+        }
     };
 
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
@@ -987,7 +1063,10 @@ async fn two_factor_authenticate(
 
     let secret = match user.two_factor_secret {
         Some(s) => s,
-        None => return HttpResponse::BadRequest().json(json!({ "message": "2FA is not enabled for this user." })),
+        None => {
+            return HttpResponse::BadRequest()
+                .json(json!({ "message": "2FA is not enabled for this user." }))
+        }
     };
 
     let totp = TOTP::new(
@@ -1114,7 +1193,8 @@ async fn unlink_oauth_provider(
 
     let provider_to_unlink = path.provider.to_lowercase();
     if !["github", "google", "discord", "email"].contains(&provider_to_unlink.as_str()) {
-        return HttpResponse::BadRequest().json(json!({ "message": "Invalid provider specified." }));
+        return HttpResponse::BadRequest()
+            .json(json!({ "message": "Invalid provider specified." }));
     }
 
     let credentials_count: (i64,) =
@@ -1125,7 +1205,8 @@ async fn unlink_oauth_provider(
         {
             Ok(count) => count,
             Err(_) => {
-                return HttpResponse::InternalServerError().json(json!({ "message": "Failed to check credentials." }))
+                return HttpResponse::InternalServerError()
+                    .json(json!({ "message": "Failed to check credentials." }))
             }
         };
 
@@ -1147,12 +1228,14 @@ async fn unlink_oauth_provider(
                 HttpResponse::Ok()
                     .json(serde_json::json!({ "message": "Successfully unlinked provider." }))
             } else {
-                HttpResponse::NotFound().json(json!({ "message": "This provider was not linked to your account." }))
+                HttpResponse::NotFound()
+                    .json(json!({ "message": "This provider was not linked to your account." }))
             }
         }
         Err(e) => {
             log!([DEBUG] => "Failed to unlink provider: {:?}", e);
-            HttpResponse::InternalServerError().json(json!({ "message": "Failed to unlink provider." }))
+            HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to unlink provider." }))
         }
     }
 }
@@ -1175,7 +1258,8 @@ async fn delete_account(req: HttpRequest, data: web::Data<AppState>) -> impl Res
         }
         Err(e) => {
             log!([DEBUG] => "Failed to mark user {} for deletion: {:?}", user_id, e);
-            HttpResponse::InternalServerError().json(json!({ "message": "Failed to schedule account deletion." }))
+            HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to schedule account deletion." }))
         }
     }
 }

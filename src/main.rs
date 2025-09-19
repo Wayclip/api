@@ -72,7 +72,7 @@ async fn main() -> std::io::Result<()> {
         AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap(),
         Some(TokenUrl::new("https://github.com/login/oauth/access_token".to_string()).unwrap()),
     )
-    .set_redirect_uri(RedirectUrl::new(format!("{}/auth/github/callback", redirect_uri)).unwrap());
+    .set_redirect_uri(RedirectUrl::new(format!("{redirect_uri}/auth/github/callback")).unwrap());
 
     let google_oauth_client = BasicClient::new(
         ClientId::new(env::var("GOOGLE_CLIENT_ID").expect("Missing GOOGLE_CLIENT_ID")),
@@ -82,7 +82,7 @@ async fn main() -> std::io::Result<()> {
         AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string()).unwrap(),
         Some(TokenUrl::new("https://www.googleapis.com/oauth2/v4/token".to_string()).unwrap()),
     )
-    .set_redirect_uri(RedirectUrl::new(format!("{}/auth/google/callback", redirect_uri)).unwrap());
+    .set_redirect_uri(RedirectUrl::new(format!("{redirect_uri}/auth/google/callback")).unwrap());
 
     let discord_oauth_client = BasicClient::new(
         ClientId::new(env::var("DISCORD_CLIENT_ID").expect("Missing DISCORD_CLIENT_ID")),
@@ -92,7 +92,7 @@ async fn main() -> std::io::Result<()> {
         AuthUrl::new("https://discord.com/api/oauth2/authorize".to_string()).unwrap(),
         Some(TokenUrl::new("https://discord.com/api/oauth2/token".to_string()).unwrap()),
     )
-    .set_redirect_uri(RedirectUrl::new(format!("{}/auth/discord/callback", redirect_uri)).unwrap());
+    .set_redirect_uri(RedirectUrl::new(format!("{redirect_uri}/auth/discord/callback")).unwrap());
 
     let stripe_secret_key = env::var("STRIPE_SECRET_KEY").expect("Missing STRIPE_SECRET_KEY");
     let redirect_url =

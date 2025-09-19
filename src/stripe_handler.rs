@@ -18,9 +18,9 @@ fn tier_from_price_id(price_id: &str) -> Option<SubscriptionTier> {
     let pro_id = std::env::var("STRIPE_PRICE_ID_PRO").ok()?;
 
     match price_id {
-        p if p == &basic_id => Some(SubscriptionTier::Tier1),
-        p if p == &plus_id => Some(SubscriptionTier::Tier2),
-        p if p == &pro_id => Some(SubscriptionTier::Tier3),
+        p if p == basic_id => Some(SubscriptionTier::Tier1),
+        p if p == plus_id => Some(SubscriptionTier::Tier2),
+        p if p == pro_id => Some(SubscriptionTier::Tier3),
         _ => {
             log!([DEBUG] => "ERROR: Unrecognized Stripe Price ID: {}", price_id);
             None

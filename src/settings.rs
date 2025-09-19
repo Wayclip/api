@@ -14,8 +14,6 @@ pub struct Settings {
     pub sftp_user: Option<String>,
     pub sftp_password: Option<String>,
     pub sftp_remote_path: Option<String>,
-    pub sftp_public_url: Option<String>,
-    pub sftp_server_public_key: Option<String>,
 
     pub limit_free: String,
     pub limit_tier1: String,

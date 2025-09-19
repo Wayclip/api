@@ -22,7 +22,6 @@ type ByteStream = Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + 
 
 pub struct StreamResponse {
     pub stream: ByteStream,
-    pub total_size: u64,
     pub content_range: String,
     pub content_length: u64,
 }
@@ -37,9 +36,9 @@ pub enum Ssh2ManagerError {
 impl fmt::Display for Ssh2ManagerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Ssh2ManagerError::Io(e) => write!(f, "IO error: {}", e),
-            Ssh2ManagerError::Ssh(e) => write!(f, "SSH error: {}", e),
-            Ssh2ManagerError::Auth(msg) => write!(f, "Authentication error: {}", msg),
+            Ssh2ManagerError::Io(e) => write!(f, "IO error: {e}"),
+            Ssh2ManagerError::Ssh(e) => write!(f, "SSH error: {e}"),
+            Ssh2ManagerError::Auth(msg) => write!(f, "Authentication error: {msg}"),
         }
     }
 }
@@ -188,11 +187,10 @@ impl Storage for LocalStorage {
         let stream = FramedRead::new(file.take(length), BytesCodec::new())
             .map(|result| result.map(|bytes_mut| bytes_mut.freeze()));
 
-        let content_range = format!("bytes {}-{}/{}", start, end, total_size);
+        let content_range = format!("bytes {start}-{end}/{total_size}");
 
         Ok(StreamResponse {
             stream: Box::new(stream),
-            total_size,
             content_range,
             content_length: length,
         })
@@ -251,7 +249,7 @@ impl Storage for SftpStorage {
             .and_then(|s| s.to_str())
             .unwrap_or("mp4");
         let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
-        let remote_file_path = format!("{}/{}", remote_dir, unique_filename);
+        let remote_file_path = format!("{remote_dir}/{unique_filename}");
 
         let pool = self.pool.clone();
 
@@ -293,7 +291,7 @@ impl Storage for SftpStorage {
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
-        let remote_file_path = format!("{}/{}", remote_dir, storage_path);
+        let remote_file_path = format!("{remote_dir}/{storage_path}");
 
         let pool = self.pool.clone();
         task::spawn_blocking(move || -> Result<()> {
@@ -314,7 +312,7 @@ impl Storage for SftpStorage {
         range: Option<(u64, u64)>,
     ) -> Result<StreamResponse> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
-        let remote_file_path_str = format!("{}/{}", remote_dir, storage_path);
+        let remote_file_path_str = format!("{remote_dir}/{storage_path}");
 
         let pool = self.pool.clone();
         let remote_file_path_for_stat = remote_file_path_str.clone();
@@ -337,7 +335,7 @@ impl Storage for SftpStorage {
         };
         let end = start + read_len - 1;
 
-        let content_range = format!("bytes {}-{}/{}", start, end, total_size);
+        let content_range = format!("bytes {start}-{end}/{total_size}");
 
         let pool = self.pool.clone();
         let (tx, rx) = mpsc::channel(4);
@@ -374,13 +372,12 @@ impl Storage for SftpStorage {
 
             if let Err(e) = result {
                 log!([DEBUG] => "ERROR: SFTP Stream failed: {}", e);
-                let _ = tx.blocking_send(Err(std::io::Error::new(ErrorKind::Other, e.to_string())));
+                let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
             }
         });
 
         Ok(StreamResponse {
             stream: Box::new(tokio_stream::wrappers::ReceiverStream::new(rx)),
-            total_size,
             content_range,
             content_length: read_len,
         })

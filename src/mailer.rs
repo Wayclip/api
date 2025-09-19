@@ -35,15 +35,14 @@ impl Mailer {
         token: &uuid::Uuid,
     ) -> Result<(), lettre::transport::smtp::Error> {
         let redirect_url = env::var("REDIRECT_URL").expect("REDIRECT_URL must be set");
-        let verification_link = format!("{}/auth/verify-email/{}", redirect_url, token);
+        let verification_link = format!("{redirect_url}/auth/verify-email/{token}");
 
         let email = Message::builder()
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
             .subject("Welcome to Wayclip! Please Verify Your Email")
             .body(format!(
-                "Hello {},\n\nThank you for registering with Wayclip. Please click the link below to verify your email address:\n\n{}\n\nThis link will expire in 1 hour.\n\nThanks,\nThe Wayclip Team",
-                username, verification_link
+                "Hello {username},\n\nThank you for registering with Wayclip. Please click the link below to verify your email address:\n\n{verification_link}\n\nThis link will expire in 1 hour.\n\nThanks,\nThe Wayclip Team",
             ))
             .unwrap();
 
@@ -60,15 +59,14 @@ impl Mailer {
     ) -> Result<(), lettre::transport::smtp::Error> {
         let frontend_url =
             env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-        let reset_link = format!("{}/reset-password?token={}", frontend_url, token);
+        let reset_link = format!("{frontend_url}/reset-password?token={token}");
 
         let email = Message::builder()
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
             .subject("Wayclip Password Reset Request")
             .body(format!(
-                "Hello {},\n\nYou requested a password reset. Click the link below to reset your password:\n\n{}\n\nThis link will expire in 1 hour. If you did not request a password reset, please ignore this email.\n\nThanks,\nThe Wayclip Team",
-                username, reset_link
+                "Hello {username},\n\nYou requested a password reset. Click the link below to reset your password:\n\n{reset_link}\n\nThis link will expire in 1 hour. If you did not request a password reset, please ignore this email.\n\nThanks,\nThe Wayclip Team",
             ))
             .unwrap();
 
