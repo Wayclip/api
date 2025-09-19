@@ -783,6 +783,7 @@ async fn login_with_password(
                 Cookie::build("token", jwt)
                     .path("/")
                     .secure(true)
+                    .domain(".wayclip.com")
                     .http_only(true)
                     .same_site(SameSite::None)
                     .finish(),

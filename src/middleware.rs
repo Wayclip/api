@@ -6,7 +6,6 @@ use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpMessage, HttpResponse,
 };
-use futures_util::future::ok;
 use futures_util::future::LocalBoxFuture;
 use sqlx::types::Uuid;
 use std::future::{ready, Ready};
@@ -177,9 +176,9 @@ where
         let user_id_opt = req.extensions().get::<Uuid>().cloned();
 
         if user_id_opt.is_none() {
-            let fut = ok(req
-                .into_response(HttpResponse::Unauthorized().finish())
-                .map_into_boxed_body());
+            let fut = ready(Ok(req
+                .into_response(HttpResponse::Forbidden().finish())
+                .map_into_boxed_body()));
             return Box::pin(fut);
         }
 

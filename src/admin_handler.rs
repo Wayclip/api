@@ -231,7 +231,7 @@ async fn get_admin_dashboard(data: web::Data<AppState>) -> impl Responder {
 
     let total_usage_query: Result<Option<i64>, _> =
         sqlx::query_scalar("SELECT SUM(file_size)::BIGINT FROM clips")
-            .fetch_one(&data.db_pool)
+            .fetch_optional(&data.db_pool)
             .await;
 
     match (users_query, reported_clips_query, total_usage_query) {
@@ -239,6 +239,7 @@ async fn get_admin_dashboard(data: web::Data<AppState>) -> impl Responder {
             HttpResponse::Ok().json(AdminDashboardData {
                 users,
                 reported_clips,
+                // FIX: Use `unwrap_or(0)` to handle the Option<i64> correctly.
                 total_data_usage: total_usage.unwrap_or(0),
             })
         }
