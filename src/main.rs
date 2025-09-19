@@ -44,6 +44,33 @@ pub struct AppState {
     mailer: mailer::Mailer,
 }
 
+async fn seed_initial_admins(db_pool: &PgPool) {
+    if let Ok(admin_emails_str) = env::var("INITIAL_ADMIN_EMAILS") {
+        if admin_emails_str.is_empty() {
+            return;
+        }
+
+        let admin_emails: Vec<&str> = admin_emails_str.split(',').map(|e| e.trim()).collect();
+        log!([DEBUG] => "Attempting to seed initial admins for emails: {:?}", admin_emails);
+
+        let result = sqlx::query("UPDATE users SET role = 'admin' WHERE email = ANY($1)")
+            .bind(&admin_emails)
+            .execute(db_pool)
+            .await;
+
+        match result {
+            Ok(query_result) => {
+                if query_result.rows_affected() > 0 {
+                    log!([DEBUG] => "Seeded initial admins. {} users affected.", query_result.rows_affected());
+                }
+            }
+            Err(e) => {
+                log!([DEBUG] => "Failed to seed initial admins: {:?}", e);
+            }
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
@@ -63,6 +90,8 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to create database pool.");
     log!([DEBUG] => "Database pool created successfully.");
+
+    seed_initial_admins(&pool).await;
 
     let github_oauth_client = BasicClient::new(
         ClientId::new(env::var("GITHUB_CLIENT_ID").expect("Missing GITHUB_CLIENT_ID")),
@@ -218,7 +247,11 @@ async fn main() -> std::io::Result<()> {
                     .wrap(middleware::AdminAuth)
                     .service(admin_handler::ban_user_and_ip)
                     .service(admin_handler::remove_video)
-                    .service(admin_handler::get_admin_dashboard),
+                    .service(admin_handler::get_admin_dashboard)
+                    .service(admin_handler::get_user_details)
+                    .service(admin_handler::update_user_role)
+                    .service(admin_handler::update_user_tier)
+                    .service(admin_handler::unban_user),
             )
             .service(clip_handler::serve_clip)
             .service(clip_handler::serve_clip_raw)

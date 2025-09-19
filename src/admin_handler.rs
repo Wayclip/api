@@ -1,6 +1,7 @@
 use crate::AppState;
-use actix_web::{get, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use serde::Serialize;
+use serde_json::json;
 use sqlx::types::chrono::Utc;
 use uuid::Uuid;
 use wayclip_core::log;
@@ -25,6 +26,36 @@ struct ReportedClipInfo {
     file_size: i64,
     uploader_username: String,
     report_token: Uuid,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateRolePayload {
+    role: UserRole,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateTierPayload {
+    tier: SubscriptionTier,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct FullUserDetails {
+    id: Uuid,
+    username: String,
+    email: Option<String>,
+    avatar_url: Option<String>,
+    tier: SubscriptionTier,
+    role: UserRole,
+    is_banned: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
+    two_factor_enabled: bool,
+    subscription_status: Option<String>,
+    current_period_end: Option<chrono::DateTime<chrono::Utc>>,
+    #[sqlx(json)]
+    connected_providers: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -71,7 +102,7 @@ async fn ban_user_and_ip(token: web::Path<Uuid>, data: web::Data<AppState>) -> i
     let mut tx = match data.db_pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            log!([DEBUG] => "ERROR: Failed to begin transaction: {:?}", e);
+            log!([DEBUG] => "DEBUG: Failed to begin transaction: {:?}", e);
             return HttpResponse::InternalServerError().finish();
         }
     };
@@ -91,7 +122,7 @@ async fn ban_user_and_ip(token: web::Path<Uuid>, data: web::Data<AppState>) -> i
                 .execute(&mut *tx)
                 .await
         {
-            log!([DEBUG] => "ERROR: Failed to ban IP address {}: {:?}", ip, e);
+            log!([DEBUG] => "DEBUG: Failed to ban IP address {}: {:?}", ip, e);
             tx.rollback().await.ok();
             return HttpResponse::InternalServerError().finish();
         }
@@ -104,14 +135,14 @@ async fn ban_user_and_ip(token: web::Path<Uuid>, data: web::Data<AppState>) -> i
     {
         Ok(_) => {
             if let Err(e) = tx.commit().await {
-                log!([DEBUG] => "ERROR: Failed to commit transaction: {:?}", e);
+                log!([DEBUG] => "DEBUG: Failed to commit transaction: {:?}", e);
                 return HttpResponse::InternalServerError().finish();
             }
             log!([DEBUG] => "Successfully banned user {}", user_id);
             HttpResponse::Ok().body(format!("User {user_id} has been banned."))
         }
         Err(e) => {
-            log!([DEBUG] => "ERROR: Failed to ban user {}: {:?}", user_id, e);
+            log!([DEBUG] => "DEBUG: Failed to ban user {}: {:?}", user_id, e);
             tx.rollback().await.ok();
             HttpResponse::InternalServerError().finish()
         }
@@ -137,7 +168,7 @@ async fn remove_video(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
     };
 
     if let Err(e) = data.storage.delete(&clip_to_delete.public_url).await {
-        log!([DEBUG] => "ERROR: Failed to delete from storage: {:?}", e);
+        log!([DEBUG] => "DEBUG: Failed to delete from storage: {:?}", e);
     }
 
     match sqlx::query!("DELETE FROM clips WHERE id = $1", clip_id)
@@ -153,7 +184,7 @@ async fn remove_video(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
             HttpResponse::Ok().body(format!("Clip {clip_id} has been removed."))
         }
         Err(e) => {
-            log!([DEBUG] => "ERROR: Failed to delete clip from DB: {:?}", e);
+            log!([DEBUG] => "DEBUG: Failed to delete clip from DB: {:?}", e);
             HttpResponse::InternalServerError().finish()
         }
     }
@@ -212,5 +243,119 @@ async fn get_admin_dashboard(data: web::Data<AppState>) -> impl Responder {
             })
         }
         _ => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+#[post("/users/{id}/role")]
+async fn update_user_role(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    payload: web::Json<UpdateRolePayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let admin_id = req.extensions().get::<Uuid>().cloned().unwrap();
+    let target_user_id = *path;
+
+    if admin_id == target_user_id {
+        return HttpResponse::Forbidden().body("Admins cannot change their own role.");
+    }
+
+    log!([DEBUG] => "Admin {} setting role for user {} to {:?}", admin_id, target_user_id, payload.role);
+
+    match sqlx::query("UPDATE users SET role = $1 WHERE id = $2")
+        .bind(&payload.role)
+        .bind(target_user_id)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(res) if res.rows_affected() > 0 => {
+            HttpResponse::Ok().json(json!({ "message": "User role updated." }))
+        }
+        Ok(_) => HttpResponse::NotFound().json(json!({ "message": "User not found." })),
+        Err(e) => {
+            log!([DEBUG] => "Failed to update user role: {:?}", e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
+#[post("/users/{id}/tier")]
+async fn update_user_tier(
+    path: web::Path<Uuid>,
+    payload: web::Json<UpdateTierPayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let target_user_id = *path;
+    log!([DEBUG] => "Admin manually setting tier for user {} to {:?}", target_user_id, payload.tier);
+
+    match sqlx::query("UPDATE users SET tier = $1 WHERE id = $2")
+        .bind(payload.tier)
+        .bind(target_user_id)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(res) if res.rows_affected() > 0 => {
+            HttpResponse::Ok().json(json!({ "message": "User tier updated." }))
+        }
+        Ok(_) => HttpResponse::NotFound().json(json!({ "message": "User not found." })),
+        Err(e) => {
+            log!([DEBUG] => "Failed to update user tier: {:?}", e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
+#[post("/users/{id}/unban")]
+async fn unban_user(path: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+    let user_id = *path;
+    log!([DEBUG] => "Admin unbanning user {}", user_id);
+    match sqlx::query("UPDATE users SET is_banned = FALSE WHERE id = $1")
+        .bind(user_id)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(res) if res.rows_affected() > 0 => {
+            HttpResponse::Ok().json(json!({ "message": "User unbanned." }))
+        }
+        Ok(_) => HttpResponse::NotFound().json(json!({ "message": "User not found." })),
+        Err(e) => {
+            log!([DEBUG] => "Failed to unban user: {:?}", e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
+#[get("/users/{id}")]
+async fn get_user_details(path: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+    let user_id = *path;
+    let query_result = sqlx::query_as!(
+        FullUserDetails,
+        r#"
+        SELECT
+            u.id, u.username, u.email, u.avatar_url,
+            u.tier as "tier: _",
+            u.role as "role: _",
+            u.is_banned, u.created_at, u.deleted_at, u.email_verified_at, u.two_factor_enabled,
+            s.status::TEXT as subscription_status,
+            s.current_period_end,
+            COALESCE(json_agg(uc.provider) FILTER (WHERE uc.provider IS NOT NULL), '[]'::json) as "connected_providers!"
+        FROM users u
+        LEFT JOIN subscriptions s ON u.id = s.user_id
+        LEFT JOIN user_credentials uc ON u.id = uc.user_id
+        WHERE u.id = $1
+        GROUP BY u.id, s.id
+        "#,
+        user_id
+    )
+    .fetch_one(&data.db_pool)
+    .await;
+
+    match query_result {
+        Ok(details) => HttpResponse::Ok().json(details),
+        Err(sqlx::Error::RowNotFound) => HttpResponse::NotFound().finish(),
+        Err(e) => {
+            log!([DEBUG] => "Failed to fetch full user details: {:?}", e);
+            HttpResponse::InternalServerError().finish()
+        }
     }
 }
