@@ -251,6 +251,11 @@ async fn main() -> std::io::Result<()> {
                     .service(admin_handler::get_user_details)
                     .service(admin_handler::update_user_role)
                     .service(admin_handler::update_user_tier)
+                    .service(admin_handler::delete_clip_by_admin)
+                    .service(admin_handler::ban_user)
+                    .service(admin_handler::ignore_report)
+                    .service(admin_handler::get_user_clips)
+                    .service(admin_handler::delete_user)
                     .service(admin_handler::unban_user),
             )
             .service(clip_handler::serve_clip)
