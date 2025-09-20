@@ -337,11 +337,16 @@ async fn handle_checkout_session_completed(
         return;
     }
 
-    let status: SubscriptionStatus = subscription
-        .status
-        .to_string()
-        .parse()
-        .unwrap_or(SubscriptionStatus::Incomplete);
+    let status = if session.payment_status == stripe::CheckoutSessionPaymentStatus::Paid {
+        SubscriptionStatus::Active
+    } else {
+        subscription
+            .status
+            .to_string()
+            .parse()
+            .unwrap_or(SubscriptionStatus::Incomplete)
+    };
+
     let query_result = sqlx::query!(
         r#"
         INSERT INTO subscriptions (user_id, stripe_subscription_id, stripe_price_id, status, current_period_start, current_period_end)

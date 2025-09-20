@@ -502,18 +502,32 @@ async fn get_user_details(path: web::Path<Uuid>, data: web::Data<AppState>) -> i
         FullUserDetails,
         r#"
         SELECT
-            u.id, u.username, u.email, u.avatar_url,
+            u.id,
+            u.username,
+            u.email,
+            u.avatar_url,
             u.tier as "tier: _",
             u.role as "role: _",
-            u.is_banned, u.created_at, u.deleted_at, u.email_verified_at, u.two_factor_enabled,
+            u.is_banned,
+            u.created_at,
+            u.deleted_at,
+            u.email_verified_at,
+            u.two_factor_enabled,
             s.status::TEXT as subscription_status,
             s.current_period_end,
-            COALESCE(json_agg(uc.provider) FILTER (WHERE uc.provider IS NOT NULL), '[]'::json) as "connected_providers!"
-        FROM users u
-        LEFT JOIN subscriptions s ON u.id = s.user_id
-        LEFT JOIN user_credentials uc ON u.id = uc.user_id
-        WHERE u.id = $1
-        GROUP BY u.id, s.id
+            COALESCE(p.providers, '[]'::json) as "connected_providers!"
+        FROM
+            users u
+        LEFT JOIN
+            subscriptions s ON u.id = s.user_id
+        LEFT JOIN
+            (
+                SELECT user_id, json_agg(provider) as providers
+                FROM user_credentials
+                GROUP BY user_id
+            ) p ON u.id = p.user_id
+        WHERE
+            u.id = $1
         "#,
         user_id
     )
