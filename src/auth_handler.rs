@@ -1,4 +1,4 @@
-use crate::{jwt, AppState};
+use crate::{jwt, mailer::Mailer, AppState};
 use actix_web::cookie::time::Duration;
 use actix_web::{
     cookie::{Cookie, SameSite},
@@ -18,6 +18,7 @@ use qrcode::QrCode;
 use rand::prelude::*;
 use rand::{random, rng};
 use serde_json::json;
+use sqlx::PgPool;
 use std::env;
 use totp_rs::{Algorithm, Secret, TOTP};
 use url::Url;
@@ -88,6 +89,94 @@ pub struct ResetPasswordPayload {
     password: String,
 }
 
+async fn is_device_recognized(
+    db: &PgPool,
+    user_id: Uuid,
+    ip_address: &str,
+) -> Result<bool, sqlx::Error> {
+    let thirty_days_ago = chrono::Utc::now() - chrono::Duration::days(30);
+    let recent_login = sqlx::query!(
+        "SELECT EXISTS (
+            SELECT 1 FROM user_login_history
+            WHERE user_id = $1 AND ip_address = $2 AND created_at > $3
+        )",
+        user_id,
+        ip_address,
+        thirty_days_ago
+    )
+    .fetch_one(db)
+    .await?;
+
+    Ok(recent_login.exists.unwrap_or(false))
+}
+
+async fn record_successful_login(
+    db: &PgPool,
+    user: &User,
+    req: &HttpRequest,
+    mailer: &Mailer,
+) -> bool {
+    let ip = req
+        .connection_info()
+        .realip_remote_addr()
+        .unwrap_or("unknown")
+        .to_string();
+
+    let mut was_unrecognized = false;
+
+    if user.two_factor_enabled {
+        match is_device_recognized(db, user.id, &ip).await {
+            Ok(true) => {}
+            Ok(false) => {
+                was_unrecognized = true;
+                if let Some(email) = &user.email {
+                    let mailer_clone = mailer.clone();
+                    let email_clone = email.clone();
+                    let username_clone = user.username.clone();
+                    let ip_clone = ip.clone();
+
+                    actix_web::rt::spawn(async move {
+                        if let Err(e) = mailer_clone.send_unrecognized_device_email(
+                            &email_clone,
+                            &username_clone,
+                            &ip_clone,
+                        ) {
+                            log!([DEBUG] => "Failed to send unrecognized device email: {:?}", e);
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                log!([DEBUG] => "Failed to check device recognition for user {}: {:?}", user.id, e);
+            }
+        }
+    }
+
+    if let Err(e) = sqlx::query!(
+        "UPDATE users SET last_login_at = NOW(), last_login_ip = $1 WHERE id = $2",
+        &ip,
+        user.id
+    )
+    .execute(db)
+    .await
+    {
+        log!([DEBUG] => "Failed to update last_login info for user {}: {:?}", user.id, e);
+    }
+
+    if let Err(e) = sqlx::query!(
+        "INSERT INTO user_login_history (user_id, ip_address) VALUES ($1, $2)",
+        user.id,
+        &ip
+    )
+    .execute(db)
+    .await
+    {
+        log!([DEBUG] => "Failed to record login history for user {}: {:?}", user.id, e);
+    }
+
+    was_unrecognized
+}
+
 async fn upsert_oauth_user(
     db: &sqlx::PgPool,
     provider: &str,
@@ -137,38 +226,6 @@ async fn upsert_oauth_user(
     Ok(user)
 }
 
-fn finalize_auth(user: User, client_type: &str, final_redirect_str: &str) -> HttpResponse {
-    let cookie_domain = ".wayclip.com";
-    log!([DEBUG] => "Creating JWT for user {}", user.id);
-    let jwt = match jwt::create_jwt(user.id, false) {
-        Ok(token) => token,
-        Err(e) => {
-            log!([AUTH] => "ERROR: Failed to create JWT: {:?}", e);
-            return HttpResponse::InternalServerError()
-                .json(json!({ "message": "Failed to create token" }));
-        }
-    };
-    if client_type == "cli" {
-        let deep_link = format!("{final_redirect_str}?token={jwt}");
-        HttpResponse::Found()
-            .append_header((LOCATION, deep_link))
-            .finish()
-    } else {
-        HttpResponse::Found()
-            .append_header((LOCATION, final_redirect_str))
-            .cookie(
-                Cookie::build("token", jwt)
-                    .path("/")
-                    .domain(cookie_domain)
-                    .secure(true)
-                    .http_only(true)
-                    .same_site(SameSite::None)
-                    .finish(),
-            )
-            .finish()
-    }
-}
-
 fn handle_oauth_error(client_type: &str, message: &str) -> HttpResponse {
     if client_type == "web" {
         let frontend_url =
@@ -180,6 +237,80 @@ fn handle_oauth_error(client_type: &str, message: &str) -> HttpResponse {
             .finish()
     } else {
         HttpResponse::Forbidden().json(json!({ "message": message }))
+    }
+}
+
+async fn finalize_login(
+    user: User,
+    client_type: &str,
+    final_redirect_str: &str,
+    data: &web::Data<AppState>,
+    req: &HttpRequest,
+) -> HttpResponse {
+    let ip = req
+        .connection_info()
+        .realip_remote_addr()
+        .unwrap_or("unknown")
+        .to_string();
+
+    let device_recognized = is_device_recognized(&data.db_pool, user.id, &ip)
+        .await
+        .unwrap_or(true);
+
+    if user.two_factor_enabled && !device_recognized {
+        let temp_jwt = match jwt::create_jwt(user.id, &user.security_stamp, true) {
+            Ok(token) => token,
+            Err(e) => {
+                log!([AUTH] => "ERROR: Failed to create 2FA JWT: {:?}", e);
+                return HttpResponse::InternalServerError()
+                    .json(json!({ "message": "Failed to create 2FA token" }));
+            }
+        };
+
+        if client_type == "cli" {
+            let deep_link = format!("{final_redirect_str}?2fa_token={temp_jwt}");
+            return HttpResponse::Found()
+                .append_header((LOCATION, deep_link))
+                .finish();
+        } else {
+            let frontend_url =
+                env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+            let two_fa_url = format!("{frontend_url}/login?2fa_required=true&token={temp_jwt}");
+            return HttpResponse::Found()
+                .append_header((LOCATION, two_fa_url))
+                .finish();
+        }
+    }
+
+    record_successful_login(&data.db_pool, &user, req, &data.mailer).await;
+
+    let final_jwt = match jwt::create_jwt(user.id, &user.security_stamp, false) {
+        Ok(token) => token,
+        Err(e) => {
+            log!([AUTH] => "ERROR: Failed to create final JWT: {:?}", e);
+            return HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to create session token" }));
+        }
+    };
+
+    if client_type == "cli" {
+        let deep_link = format!("{final_redirect_str}?token={final_jwt}");
+        HttpResponse::Found()
+            .append_header((LOCATION, deep_link))
+            .finish()
+    } else {
+        HttpResponse::Found()
+            .append_header((LOCATION, final_redirect_str))
+            .cookie(
+                Cookie::build("token", final_jwt)
+                    .path("/")
+                    .domain(".wayclip.com")
+                    .secure(true)
+                    .http_only(true)
+                    .same_site(SameSite::None)
+                    .finish(),
+            )
+            .finish()
     }
 }
 
@@ -212,6 +343,7 @@ async fn github_login(
 
 #[get("/github/callback")]
 async fn github_callback(
+    req: HttpRequest,
     query: web::Query<AuthRequest>,
     data: web::Data<AppState>,
 ) -> impl Responder {
@@ -291,7 +423,7 @@ async fn github_callback(
                 .json(json!({ "message": "Database error" }));
         }
     };
-    finalize_auth(user, client_type, redirect)
+    finalize_login(user, client_type, redirect, &data, &req).await
 }
 
 #[get("/google")]
@@ -324,6 +456,7 @@ async fn google_login(
 
 #[get("/google/callback")]
 async fn google_callback(
+    req: HttpRequest,
     query: web::Query<AuthRequest>,
     data: web::Data<AppState>,
 ) -> impl Responder {
@@ -386,7 +519,7 @@ async fn google_callback(
                 .json(json!({ "message": "Database error" }));
         }
     };
-    finalize_auth(user, client_type, redirect)
+    finalize_login(user, client_type, redirect, &data, &req).await
 }
 
 #[get("/discord")]
@@ -418,6 +551,7 @@ async fn discord_login(
 
 #[get("/discord/callback")]
 async fn discord_callback(
+    req: HttpRequest,
     query: web::Query<AuthRequest>,
     data: web::Data<AppState>,
 ) -> impl Responder {
@@ -494,7 +628,7 @@ async fn discord_callback(
                 .json(json!({ "message": "Database error" }));
         }
     };
-    finalize_auth(user, client_type, redirect)
+    finalize_login(user, client_type, redirect, &data, &req).await
 }
 
 #[post("/register")]
@@ -688,7 +822,7 @@ async fn resend_verification_email(
     )
     .execute(&mut *tx)
     .await
-    .ok(); // Non-critical if it fails
+    .ok();
 
     let token = Uuid::new_v4();
     if sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(token).bind(user.id).execute(&mut *tx).await.is_err() {
@@ -708,52 +842,45 @@ async fn resend_verification_email(
     HttpResponse::Ok().json(success_message)
 }
 
-#[derive(sqlx::FromRow)]
-struct Creds {
-    id: Uuid,
-    two_factor_enabled: bool,
-    email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
-    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    is_banned: bool,
-}
-
 #[post("/login")]
 async fn login_with_password(
+    req: HttpRequest,
     payload: web::Json<PasswordLoginPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    let creds = match sqlx::query_as::<_, Creds>(
-        r#"SELECT id, two_factor_enabled, email_verified_at, deleted_at, is_banned FROM users WHERE email = $1"#,
-    )
-    .bind(&payload.email)
-    .fetch_optional(&data.db_pool)
-    .await
-    .unwrap_or(None)
+    let user = match sqlx::query_as::<_, User>(r#"SELECT * FROM users WHERE email = $1"#)
+        .bind(&payload.email)
+        .fetch_optional(&data.db_pool)
+        .await
+        .unwrap_or(None)
     {
-        Some(c) => c,
-        None => return HttpResponse::Unauthorized().json(json!({ "message": "Invalid credentials." })),
+        Some(u) => u,
+        None => {
+            return HttpResponse::Unauthorized().json(json!({ "message": "Invalid credentials." }))
+        }
     };
-    if creds.deleted_at.is_some() {
+
+    if user.deleted_at.is_some() {
         let message = "Your account has been scheduled for deletion. You have 14 days to request recovery by contacting support at support@wayclip.com";
         return HttpResponse::Forbidden().json(json!({ "message": message }));
     }
-    if creds.is_banned {
+    if user.is_banned {
         return HttpResponse::Forbidden()
             .json(json!({ "message": "Your account has been banned." }));
     }
-    if creds.email_verified_at.is_none() {
-        return HttpResponse::Forbidden()
-            .json(json!({ "error_code": "EMAIL_NOT_VERIFIED", "message": "Please verify your email address before logging in." }));
+    if user.email_verified_at.is_none() {
+        return HttpResponse::Forbidden().json(json!({ "error_code": "EMAIL_NOT_VERIFIED", "message": "Please verify your email address before logging in." }));
     }
+
     let hash = match sqlx::query_scalar::<_, String>(
         "SELECT password_hash FROM user_credentials WHERE user_id = $1 AND provider = 'email'",
     )
-    .bind(creds.id)
-    .fetch_one(&data.db_pool)
+    .bind(user.id)
+    .fetch_optional(&data.db_pool)
     .await
     {
-        Ok(h) => h,
-        Err(_) => {
+        Ok(Some(h)) => h,
+        _ => {
             return HttpResponse::Unauthorized().json(json!({ "message": "Invalid credentials." }))
         }
     };
@@ -773,23 +900,7 @@ async fn login_with_password(
         return HttpResponse::Unauthorized().json(json!({ "message": "Invalid credentials." }));
     }
 
-    if creds.two_factor_enabled {
-        let temp_jwt = jwt::create_jwt(creds.id, true).unwrap();
-        HttpResponse::Ok().json(serde_json::json!({ "2fa_required": true, "2fa_token": temp_jwt }))
-    } else {
-        let jwt = jwt::create_jwt(creds.id, false).unwrap();
-        HttpResponse::Ok()
-            .cookie(
-                Cookie::build("token", jwt)
-                    .path("/")
-                    .secure(true)
-                    .domain(".wayclip.com")
-                    .http_only(true)
-                    .same_site(SameSite::None)
-                    .finish(),
-            )
-            .json(serde_json::json!({ "success": true, "message": "Login successful" }))
-    }
+    finalize_login(user, "web", "/", &data, &req).await
 }
 
 #[post("/forgot-password")]
@@ -912,7 +1023,7 @@ async fn reset_password(
     )
     .execute(&mut *tx)
     .await
-    .ok(); // Not critical if this fails
+    .ok();
 
     if tx.commit().await.is_err() {
         return HttpResponse::InternalServerError()
@@ -1042,6 +1153,7 @@ async fn two_factor_verify(
 
 #[post("/2fa/authenticate")]
 async fn two_factor_authenticate(
+    req: HttpRequest,
     payload: web::Json<TwoFactorAuthPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
@@ -1062,7 +1174,14 @@ async fn two_factor_authenticate(
         Err(_) => return HttpResponse::NotFound().json(json!({ "message": "User not found." })),
     };
 
-    let secret = match user.two_factor_secret {
+    if claims.sec != user.security_stamp {
+        return HttpResponse::Unauthorized()
+            .json(json!({ "message": "Invalid or expired 2FA token." }));
+    }
+
+    let user_clone = user.clone();
+
+    let secret = match user_clone.two_factor_secret {
         Some(s) => s,
         None => {
             return HttpResponse::BadRequest()
@@ -1081,8 +1200,50 @@ async fn two_factor_authenticate(
     )
     .unwrap();
 
-    if totp.check_current(&payload.code).unwrap_or(false) {
-        let jwt = jwt::create_jwt(claims.sub, false).unwrap();
+    let mut code_is_valid = totp.check_current(&payload.code).unwrap_or(false);
+    let mut used_recovery_code = false;
+
+    if !code_is_valid {
+        let recovery_codes = sqlx::query_as::<_, (String,)>(
+            "SELECT code_hash FROM user_recovery_codes WHERE user_id = $1",
+        )
+        .bind(claims.sub)
+        .fetch_all(&data.db_pool)
+        .await
+        .unwrap_or_default();
+
+        for (code_hash,) in recovery_codes {
+            if Argon2::default()
+                .verify_password(
+                    payload.code.as_bytes(),
+                    &PasswordHash::new(&code_hash).unwrap(),
+                )
+                .is_ok()
+            {
+                sqlx::query(
+                    "DELETE FROM user_recovery_codes WHERE user_id = $1 AND code_hash = $2",
+                )
+                .bind(claims.sub)
+                .bind(code_hash)
+                .execute(&data.db_pool)
+                .await
+                .ok();
+                code_is_valid = true;
+                used_recovery_code = true;
+                break;
+            }
+        }
+    }
+
+    if code_is_valid {
+        record_successful_login(&data.db_pool, &user, &req, &data.mailer).await;
+
+        let jwt = jwt::create_jwt(user.id, &user.security_stamp, false).unwrap();
+        let message = if used_recovery_code {
+            "2FA validation successful with recovery code."
+        } else {
+            "2FA validation successful"
+        };
         return HttpResponse::Ok()
             .cookie(
                 Cookie::build("token", jwt)
@@ -1093,47 +1254,7 @@ async fn two_factor_authenticate(
                     .same_site(SameSite::None)
                     .finish(),
             )
-            .json(serde_json::json!({ "success": true, "message": "2FA validation successful" }));
-    }
-
-    let recovery_codes = sqlx::query_as::<_, (String,)>(
-        "SELECT code_hash FROM user_recovery_codes WHERE user_id = $1",
-    )
-    .bind(claims.sub)
-    .fetch_all(&data.db_pool)
-    .await
-    .unwrap_or_default();
-
-    for (code_hash,) in recovery_codes {
-        if Argon2::default()
-            .verify_password(
-                payload.code.as_bytes(),
-                &PasswordHash::new(&code_hash).unwrap(),
-            )
-            .is_ok()
-        {
-            sqlx::query("DELETE FROM user_recovery_codes WHERE user_id = $1 AND code_hash = $2")
-                .bind(claims.sub)
-                .bind(code_hash)
-                .execute(&data.db_pool)
-                .await
-                .ok();
-
-            let jwt = jwt::create_jwt(claims.sub, false).unwrap();
-            return HttpResponse::Ok()
-                .cookie(
-                    Cookie::build("token", jwt)
-                        .path("/")
-                        .domain(".wayclip.com")
-                        .secure(true)
-                        .http_only(true)
-                        .same_site(SameSite::None)
-                        .finish(),
-                )
-                .json(
-                    serde_json::json!({ "success": true, "message": "2FA validation successful with recovery code." }),
-                );
-        }
+            .json(serde_json::json!({ "success": true, "message": message }));
     }
 
     HttpResponse::Unauthorized().json(json!({ "message": "Invalid 2FA code or recovery code." }))
@@ -1279,4 +1400,42 @@ async fn logout() -> impl Responder {
     HttpResponse::Ok()
         .cookie(cookie)
         .json(serde_json::json!({ "message": "Logged out successfully." }))
+}
+
+#[post("/logout-devices")]
+async fn logout_all_devices(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    let user_id = match req.extensions().get::<Uuid>() {
+        Some(id) => *id,
+        None => return HttpResponse::Unauthorized().finish(),
+    };
+
+    let new_stamp = Uuid::new_v4();
+
+    match sqlx::query("UPDATE users SET security_stamp = $1 WHERE id = $2")
+        .bind(new_stamp)
+        .bind(user_id)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(_) => {
+            log!([DEBUG] => "User {} logged out all other devices.", user_id);
+            let new_jwt = jwt::create_jwt(user_id, &new_stamp, false).unwrap();
+            HttpResponse::Ok()
+                .cookie(
+                    Cookie::build("token", new_jwt)
+                        .path("/")
+                        .domain(".wayclip.com")
+                        .secure(true)
+                        .http_only(true)
+                        .same_site(SameSite::None)
+                        .finish(),
+                )
+                .json(serde_json::json!({ "message": "All other sessions have been logged out." }))
+        }
+        Err(e) => {
+            log!([DEBUG] => "Failed to logout devices for user {}: {:?}", user_id, e);
+            HttpResponse::InternalServerError()
+                .json(json!({ "message": "Failed to log out other devices." }))
+        }
+    }
 }

@@ -217,6 +217,7 @@ async fn main() -> std::io::Result<()> {
                     .service(auth_handler::reset_password)
                     .service(auth_handler::resend_verification_email)
                     .service(auth_handler::logout)
+                    .service(auth_handler::logout_all_devices) // New endpoint
                     .service(auth_handler::two_factor_authenticate),
             )
             .service(

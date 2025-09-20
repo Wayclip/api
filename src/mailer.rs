@@ -32,22 +32,16 @@ impl Mailer {
 
     fn read_and_populate_template(
         &self,
-        subject: &str,
-        username: &str,
-        body_text: &str,
-        link: &str,
-        button_text: &str,
+        template_name: &str,
+        placeholders: &[(&str, &str)],
     ) -> String {
-        let template_path = "assets/email.html";
+        let template_path = format!("assets/{}.html", template_name);
         let mut template =
-            fs::read_to_string(template_path).expect("Should have been able to read the file");
+            fs::read_to_string(&template_path).expect("Should have been able to read the file");
 
-        template = template.replace("{{subject}}", subject);
-        template = template.replace("{{username}}", username);
-        template = template.replace("{{body}}", body_text);
-        template = template.replace("{{link}}", link);
-        template = template.replace("{{button_text}}", button_text);
-
+        for (key, value) in placeholders {
+            template = template.replace(&format!("{{{{{}}}}}", key), value);
+        }
         template
     }
 
@@ -65,11 +59,14 @@ impl Mailer {
         let button_text = "Verify Email";
 
         let html_body = self.read_and_populate_template(
-            subject,
-            username,
-            body_text,
-            &verification_link,
-            button_text,
+            "email",
+            &[
+                ("subject", subject),
+                ("username", username),
+                ("body", body_text),
+                ("link", &verification_link),
+                ("button_text", button_text),
+            ],
         );
 
         let email = Message::builder()
@@ -100,8 +97,57 @@ impl Mailer {
             "You requested a password reset. Click the button below to reset your password:";
         let button_text = "Reset Password";
 
-        let html_body =
-            self.read_and_populate_template(subject, username, body_text, &reset_link, button_text);
+        let html_body = self.read_and_populate_template(
+            "email",
+            &[
+                ("subject", subject),
+                ("username", username),
+                ("body", body_text),
+                ("link", &reset_link),
+                ("button_text", button_text),
+            ],
+        );
+
+        let email = Message::builder()
+            .from(self.from_address.parse().unwrap())
+            .to(to.parse().unwrap())
+            .subject(subject)
+            .header(ContentType::TEXT_HTML)
+            .body(html_body)
+            .unwrap();
+
+        self.mailer.send(&email)?;
+
+        Ok(())
+    }
+
+    pub fn send_unrecognized_device_email(
+        &self,
+        to: &str,
+        username: &str,
+        ip_address: &str,
+    ) -> Result<(), lettre::transport::smtp::Error> {
+        let frontend_url =
+            env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        let security_link = format!("{frontend_url}/dash");
+
+        let subject = "Security Alert: New Sign-in to Your Wayclip Account";
+        let body_text = &format!(
+            "We noticed a new sign-in to your account from an unrecognized device (IP: {}). If this was you, you can safely ignore this email. If you don't recognize this activity, please secure your account immediately.",
+            ip_address
+        );
+        let button_text = "Review Account Security";
+
+        let html_body = self.read_and_populate_template(
+            "email",
+            &[
+                ("subject", subject),
+                ("username", username),
+                ("body", body_text),
+                ("link", &security_link),
+                ("button_text", button_text),
+            ],
+        );
 
         let email = Message::builder()
             .from(self.from_address.parse().unwrap())

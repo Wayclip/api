@@ -1,26 +1,25 @@
-use crate::jwt;
-use crate::AppState;
-use actix_web::web;
+use crate::{jwt, AppState};
 use actix_web::{
-    body::BoxBody,
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    Error, HttpMessage, HttpResponse,
+    http::header,
+    web, Error, HttpMessage,
 };
-use futures_util::future::LocalBoxFuture;
-use sqlx::types::Uuid;
-use std::future::{ready, Ready};
+use futures_util::future::{ready, LocalBoxFuture, Ready};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use wayclip_core::log;
-use wayclip_core::models::{User, UserRole};
+use wayclip_core::models::UserRole;
 
 pub struct Auth;
 
-impl<S> Transform<S, ServiceRequest> for Auth
+impl<S, B> Transform<S, ServiceRequest> for Auth
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error> + 'static,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
+    B: 'static,
 {
-    type Response = ServiceResponse<BoxBody>;
+    type Response = ServiceResponse<B>;
     type Error = Error;
     type InitError = ();
     type Transform = AuthMiddleware<S>;
@@ -37,173 +36,124 @@ pub struct AuthMiddleware<S> {
     service: Rc<S>,
 }
 
-impl<S> Service<ServiceRequest> for AuthMiddleware<S>
+#[derive(sqlx::FromRow)]
+struct UserAuthInfo {
+    security_stamp: uuid::Uuid,
+    role: UserRole,
+}
+
+impl<S, B> Service<ServiceRequest> for AuthMiddleware<S>
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error> + 'static,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
+    B: 'static,
 {
-    type Response = ServiceResponse<BoxBody>;
+    type Response = ServiceResponse<B>;
     type Error = Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        log!([DEBUG] => "Auth middleware processing request for URI: {}", req.uri());
+        let service = self.service.clone();
 
-        let mut token_str: Option<String> = req
-            .headers()
-            .get("Authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|s| s.to_string());
+        Box::pin(async move {
+            let token = req
+                .cookie("token")
+                .map(|c| c.value().to_string())
+                .or_else(|| {
+                    req.headers()
+                        .get(header::AUTHORIZATION)
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.strip_prefix("Bearer "))
+                        .map(|s| s.to_string())
+                });
 
-        if token_str.is_none() {
-            if let Some(cookie) = req.cookie("token") {
-                log!([DEBUG] => "Found 'token' in httpOnly cookie.");
-                token_str = Some(cookie.value().to_string());
-            }
-        }
+            if let Some(token_str) = token {
+                if let Ok(claims) = jwt::validate_jwt(&token_str) {
+                    if claims.is_2fa {
+                        log!([AUTH] => "Auth failed: A temporary 2FA token was used for a protected endpoint.");
+                    } else if let Some(data) = req.app_data::<web::Data<AppState>>() {
+                        let user_info = sqlx::query_as!(
+                            UserAuthInfo,
+                            r#"
+                            SELECT security_stamp, role as "role: UserRole"
+                            FROM users
+                            WHERE id = $1 AND is_banned = false AND deleted_at IS NULL
+                            "#,
+                            claims.sub
+                        )
+                        .fetch_optional(&data.db_pool)
+                        .await;
 
-        match token_str {
-            Some(token) => {
-                log!([DEBUG] => "Found token, attempting validation.");
-                match jwt::validate_jwt(&token) {
-                    Ok(claims) => {
-                        let data = req
-                            .app_data::<web::Data<AppState>>()
-                            .expect("AppState not found")
-                            .clone();
-
-                        let svc = self.service.clone();
-
-                        Box::pin(async move {
-                            let user_opt =
-                                sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-                                    .bind(claims.sub)
-                                    .fetch_optional(&data.db_pool)
-                                    .await;
-
-                            match user_opt {
-                                Ok(Some(user)) if user.deleted_at.is_none() && !user.is_banned => {
-                                    req.extensions_mut().insert(claims.sub);
-                                    svc.call(req).await.map(|res| res.map_into_boxed_body())
-                                }
-                                Ok(Some(user)) => {
-                                    let reason = if user.deleted_at.is_some() {
-                                        "account deleted"
-                                    } else {
-                                        "banned"
-                                    };
-                                    log!([AUTH] => "Access denied for user {}: {}", claims.sub, reason);
-                                    Ok(req
-                                        .into_response(HttpResponse::Unauthorized().finish())
-                                        .map_into_boxed_body())
-                                }
-                                Ok(None) => {
-                                    log!([AUTH] => "User not found for ID: {}", claims.sub);
-                                    Ok(req
-                                        .into_response(HttpResponse::Unauthorized().finish())
-                                        .map_into_boxed_body())
-                                }
-                                Err(e) => {
-                                    log!([DEBUG] => "Database error during auth: {:?}", e);
-                                    Ok(req
-                                        .into_response(HttpResponse::InternalServerError().finish())
-                                        .map_into_boxed_body())
-                                }
+                        match user_info {
+                            Ok(Some(info)) if info.security_stamp == claims.sec => {
+                                req.extensions_mut().insert(claims.sub);
+                                req.extensions_mut().insert(info.role);
+                                return service.call(req).await;
                             }
-                        })
-                    }
-                    Err(e) => {
-                        log!([AUTH] => "Token validation failed: {:?}", e);
-                        Box::pin(async move {
-                            Ok(req
-                                .into_response(HttpResponse::Unauthorized().finish())
-                                .map_into_boxed_body())
-                        })
+                            Ok(Some(_)) => {
+                                log!([AUTH] => "Auth failed for user {}: security stamp mismatch.", claims.sub);
+                            }
+                            _ => {
+                                log!([AUTH] => "Auth failed: User {} not found or is banned/deleted.", claims.sub);
+                            }
+                        }
                     }
                 }
+            } else {
+                log!([AUTH] => "Auth failed: No token found.");
             }
-            None => {
-                log!([AUTH] => "No token found in Authorization header or cookie.");
-                Box::pin(async move {
-                    Ok(req
-                        .into_response(HttpResponse::Unauthorized().finish())
-                        .map_into_boxed_body())
-                })
-            }
-        }
+
+            Err(actix_web::error::ErrorUnauthorized("Unauthorized"))
+        })
     }
 }
 
 pub struct AdminAuth;
 
-impl<S> Transform<S, ServiceRequest> for AdminAuth
+impl<S, B> Transform<S, ServiceRequest> for AdminAuth
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error> + 'static,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
+    B: 'static,
 {
-    type Response = ServiceResponse<BoxBody>;
+    type Response = ServiceResponse<B>;
     type Error = Error;
     type InitError = ();
     type Transform = AdminAuthMiddleware<S>;
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ready(Ok(AdminAuthMiddleware {
-            service: Rc::new(service),
-        }))
+        ready(Ok(AdminAuthMiddleware { service }))
     }
 }
 
 pub struct AdminAuthMiddleware<S> {
-    service: Rc<S>,
+    service: S,
 }
 
-impl<S> Service<ServiceRequest> for AdminAuthMiddleware<S>
+impl<S, B> Service<ServiceRequest> for AdminAuthMiddleware<S>
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<BoxBody>, Error = Error> + 'static,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     S::Future: 'static,
+    B: 'static,
 {
-    type Response = ServiceResponse<BoxBody>;
+    type Response = ServiceResponse<B>;
     type Error = Error;
-    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
 
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        let user_id_opt = req.extensions().get::<Uuid>().cloned();
+        let is_admin = req.extensions().get::<UserRole>() == Some(&UserRole::Admin);
 
-        if user_id_opt.is_none() {
-            let fut = ready(Ok(req
-                .into_response(HttpResponse::Forbidden().finish())
-                .map_into_boxed_body()));
-            return Box::pin(fut);
+        if is_admin {
+            let fut = self.service.call(req);
+            Box::pin(fut)
+        } else {
+            log!([AUTH] => "Forbidden: Non-admin user attempted to access admin route.");
+            Box::pin(async move { Err(actix_web::error::ErrorForbidden("Forbidden")) })
         }
-
-        let user_id = user_id_opt.unwrap();
-
-        let data = req.app_data::<web::Data<AppState>>().unwrap().clone();
-        let service = self.service.clone();
-
-        Box::pin(async move {
-            let is_admin =
-                sqlx::query_scalar::<_, UserRole>("SELECT role FROM users WHERE id = $1")
-                    .bind(user_id)
-                    .fetch_optional(&data.db_pool)
-                    .await
-                    .unwrap_or_default()
-                    .map(|role| role == UserRole::Admin)
-                    .unwrap_or(false);
-
-            if is_admin {
-                service.call(req).await.map(|res| res.map_into_boxed_body())
-            } else {
-                Ok(req
-                    .into_response(HttpResponse::Forbidden().finish())
-                    .map_into_boxed_body())
-            }
-        })
     }
 }

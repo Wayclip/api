@@ -10,11 +10,13 @@ pub struct Claims {
     pub sub: Uuid,
     pub exp: i64,
     pub iat: i64,
+    pub sec: Uuid,
     pub is_2fa: bool,
 }
 
 pub fn create_jwt(
     user_id: Uuid,
+    security_stamp: &Uuid,
     is_2fa_token: bool,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     log!([AUTH] => "Creating new JWT for user ID: {}. 2FA temp: {}", user_id, is_2fa_token);
@@ -31,6 +33,7 @@ pub fn create_jwt(
         sub: user_id,
         exp: expiration.timestamp(),
         iat: now.timestamp(),
+        sec: *security_stamp,
         is_2fa: is_2fa_token,
     };
 
