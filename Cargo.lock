@@ -8361,7 +8361,7 @@ dependencies = [
 
 [[package]]
 name = "wayclip-api"
-version = "0.1.78"
+version = "0.1.79"
 dependencies = [
  "actix-cors",
  "actix-extensible-rate-limit",

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            u.id,\n            u.username,\n            u.email,\n            u.avatar_url,\n            u.tier as \"tier: _\",\n            u.role as \"role: _\",\n            u.is_banned,\n            u.created_at,\n            u.deleted_at,\n            u.email_verified_at,\n            u.two_factor_enabled,\n            s.status::TEXT as subscription_status,\n            s.current_period_end,\n            (\n                SELECT COALESCE(json_agg(provider), '[]'::json)\n                FROM user_credentials\n                WHERE user_id = u.id\n            ) as \"connected_providers!\"\n        FROM\n            users u\n        LEFT JOIN\n            subscriptions s ON u.id = s.user_id\n        WHERE\n            u.id = $1\n        ",
+  "query": "\n        SELECT\n            u.id,\n            u.username,\n            u.email,\n            u.avatar_url,\n            u.tier as \"tier: _\",\n            u.role as \"role: _\",\n            u.is_banned,\n            u.created_at,\n            u.deleted_at,\n            u.email_verified_at,\n            u.two_factor_enabled,\n            s.status::TEXT as \"subscription_status?\",\n            s.current_period_end as \"current_period_end?\",\n            (\n                SELECT COALESCE(json_agg(provider), '[]'::json)\n                FROM user_credentials\n                WHERE user_id = u.id\n            ) as \"connected_providers!\"\n        FROM\n            users u\n        LEFT JOIN\n            subscriptions s ON u.id = s.user_id\n        WHERE\n            u.id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -82,12 +82,12 @@
       },
       {
         "ordinal": 11,
-        "name": "subscription_status",
+        "name": "subscription_status?",
         "type_info": "Text"
       },
       {
         "ordinal": 12,
-        "name": "current_period_end",
+        "name": "current_period_end?",
         "type_info": "Timestamptz"
       },
       {
@@ -118,5 +118,5 @@
       null
     ]
   },
-  "hash": "124419c34a302b2e7deb21031cc2d83170465b7382844fc8ec2c69fdf3fabec9"
+  "hash": "d9ab6551f52a0b2acd50e3135cf68362923f7337d4764b4ce52e4ba757c832bf"
 }
