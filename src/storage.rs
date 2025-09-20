@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::{Stream, StreamExt};
 use r2d2::ManageConnection;
-use ssh2::{OpenFlags, OpenType, Session};
+use ssh2::Session;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
@@ -16,7 +16,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_util::codec::{BytesCodec, FramedRead};
-use uuid::Uuid;
 
 type ByteStream = Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin>;
 
@@ -106,7 +105,7 @@ impl ManageConnection for Ssh2ConnectionManager {
 
 #[async_trait]
 pub trait Storage: Send + Sync {
-    async fn upload(&self, file_name: &str, stream: ByteStream) -> Result<(String, i64)>;
+    async fn upload(&self, storage_path: &str, stream: ByteStream) -> Result<(String, i64)>;
     async fn delete(&self, storage_path: &str) -> Result<()>;
     async fn download_stream(
         &self,
@@ -133,15 +132,19 @@ impl LocalStorage {
 
 #[async_trait]
 impl Storage for LocalStorage {
-    async fn upload(&self, file_name: &str, mut stream: ByteStream) -> Result<(String, i64)> {
-        log!([DEBUG] => "LOCAL: Uploading file '{}'", file_name);
+    async fn upload(&self, storage_path: &str, mut stream: ByteStream) -> Result<(String, i64)> {
+        log!([DEBUG] => "LOCAL: Starting upload for storage path '{}'", storage_path);
         tokio::fs::create_dir_all(&self.storage_path).await?;
-        let extension = Path::new(file_name)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("bin");
-        let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
-        let file_path = self.storage_path.join(&unique_filename);
+
+        let file_path = self.storage_path.join(storage_path);
+
+        if !file_path.starts_with(&self.storage_path) {
+            return Err(anyhow!(
+                "Security Error: Invalid storage path for upload '{}'",
+                storage_path
+            ));
+        }
+
         let mut file = File::create(&file_path).await?;
         let mut total_bytes = 0;
 
@@ -150,8 +153,8 @@ impl Storage for LocalStorage {
             file.write_all(&chunk).await?;
             total_bytes += chunk.len() as i64;
         }
-        log!([DEBUG] => "LOCAL: Upload of {} bytes to '{}' complete.", total_bytes, unique_filename);
-        Ok((unique_filename, total_bytes))
+        log!([DEBUG] => "LOCAL: Upload of {} bytes to '{}' complete.", total_bytes, storage_path);
+        Ok((storage_path.to_string(), total_bytes))
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {
@@ -159,7 +162,7 @@ impl Storage for LocalStorage {
         let file_path = self.storage_path.join(storage_path);
         if !file_path.starts_with(&self.storage_path) {
             return Err(anyhow!(
-                "Invalid storage path for deletion: {}",
+                "Security Error: Invalid storage path for deletion: {}",
                 storage_path
             ));
         }
@@ -242,51 +245,49 @@ impl SftpStorage {
 
 #[async_trait]
 impl Storage for SftpStorage {
-    async fn upload(&self, file_name: &str, mut stream: ByteStream) -> Result<(String, i64)> {
+    async fn upload(&self, storage_path: &str, mut stream: ByteStream) -> Result<(String, i64)> {
         let remote_dir = self.remote_path.trim_end_matches('/').to_string();
-        let extension = Path::new(file_name)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mp4");
-        let unique_filename = format!("{}.{}", Uuid::new_v4(), extension);
-        let remote_file_path = format!("{remote_dir}/{unique_filename}");
+        let remote_file_path = format!("{remote_dir}/{storage_path}");
 
-        let pool = self.pool.clone();
+        let (tx, mut rx) = mpsc::channel::<Bytes>(8);
 
-        let uploader = task::spawn_blocking(move || -> Result<i64> {
-            log!([DEBUG] => "SFTP POOL: Getting connection for upload...");
-            let conn = pool.get()?;
-            let sftp = conn.sftp()?;
+        let uploader_task = {
+            let pool = self.pool.clone();
+            let remote_file_path_clone = remote_file_path.clone();
+            task::spawn_blocking(move || -> Result<i64> {
+                log!([DEBUG] => "SFTP POOL: Getting connection for upload to '{}'", remote_file_path_clone);
+                let conn = pool.get()?;
+                let sftp = conn.sftp()?;
 
-            if let Some(parent) = Path::new(&remote_file_path).parent() {
-                let _ = sftp.mkdir(parent, 0o755);
-            }
-
-            let mut remote_file = sftp.open_mode(
-                Path::new(&remote_file_path),
-                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-                0o644,
-                OpenType::File,
-            )?;
-
-            let mut total_bytes = 0;
-            let rt = tokio::runtime::Handle::current();
-            while let Some(chunk_result) = rt.block_on(stream.next()) {
-                match chunk_result {
-                    Ok(chunk) => {
-                        remote_file.write_all(&chunk)?;
-                        total_bytes += chunk.len() as i64;
-                    }
-                    Err(e) => return Err(e.into()),
+                if let Some(parent) = Path::new(&remote_file_path_clone).parent() {
+                    let _ = sftp.mkdir(parent, 0o755);
                 }
+
+                let mut remote_file = sftp.create(Path::new(&remote_file_path_clone))?;
+                let mut total_bytes = 0;
+
+                while let Some(chunk) = rx.blocking_recv() {
+                    remote_file.write_all(&chunk)?;
+                    total_bytes += chunk.len() as i64;
+                }
+
+                log!([DEBUG] => "SFTP POOL: Upload of {} bytes to '{}' complete.", total_bytes, remote_file_path_clone);
+                Ok(total_bytes)
+            })
+        };
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            if tx.send(chunk).await.is_err() {
+                log!([DEBUG] => "ERROR: SFTP upload channel closed unexpectedly.");
+                break;
             }
+        }
 
-            log!([DEBUG] => "SFTP POOL: Upload of {} bytes to '{}' complete.", total_bytes, remote_file_path);
-            Ok(total_bytes)
-        });
+        drop(tx);
 
-        let total_bytes = uploader.await??;
-        Ok((unique_filename, total_bytes))
+        let total_bytes = uploader_task.await??;
+        Ok((storage_path.to_string(), total_bytes))
     }
 
     async fn delete(&self, storage_path: &str) -> Result<()> {

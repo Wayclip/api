@@ -188,19 +188,21 @@ where
         let service = self.service.clone();
 
         Box::pin(async move {
-            let user_role_query =
-                sqlx::query_as::<_, (UserRole,)>("SELECT role FROM users WHERE id = $1")
+            let is_admin =
+                sqlx::query_scalar::<_, UserRole>("SELECT role FROM users WHERE id = $1")
                     .bind(user_id)
                     .fetch_optional(&data.db_pool)
-                    .await;
+                    .await
+                    .unwrap_or_default()
+                    .map(|role| role == UserRole::Admin)
+                    .unwrap_or(false);
 
-            match user_role_query {
-                Ok(Some((role,))) if role == UserRole::Admin => {
-                    service.call(req).await.map(|res| res.map_into_boxed_body())
-                }
-                _ => Ok(req
+            if is_admin {
+                service.call(req).await.map(|res| res.map_into_boxed_body())
+            } else {
+                Ok(req
                     .into_response(HttpResponse::Forbidden().finish())
-                    .map_into_boxed_body()),
+                    .map_into_boxed_body())
             }
         })
     }

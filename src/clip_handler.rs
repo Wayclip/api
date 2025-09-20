@@ -104,17 +104,18 @@ pub async fn share_clip_upload(
         .bind(clip_id)
         .fetch_one(&data.db_pool)
         .await
-        .map_err(|_| actix_web::error::ErrorNotFound("Upload ID not found or already completed"))?;
+        .map_err(|e| {
+            log!([DEBUG] => "Failed to find pending clip for upload: {}. Error: {:?}", clip_id, e);
+            actix_web::error::ErrorNotFound("Upload ID not found or already completed")
+        })?;
 
     if let Some(field_result) = payload.next().await {
         let mut field = field_result?;
-
         let (tx, rx) = mpsc::channel(4);
-
         let background_data = data.clone();
+        
         actix_web::rt::spawn(async move {
-            log!([DEBUG] => "[BG] Starting background SFTP upload for clip ID: {}", clip_id);
-
+            log!([DEBUG] => "[BG] Starting background storage upload for clip ID: {}", clip_id);
             let stream = ReceiverStream::new(rx);
 
             if let Err(e) = background_data
@@ -122,23 +123,25 @@ pub async fn share_clip_upload(
                 .upload(&clip.public_url, Box::new(stream))
                 .await
             {
-                log!([DEBUG] => "ERROR: [BG] SFTP upload failed for clip {}: {:?}", clip_id, e);
+                log!([DEBUG] => "ERROR: [BG] Storage upload failed for clip {}: {:?}", clip_id, e);
                 let _ = sqlx::query("UPDATE clips SET status = 'failed' WHERE id = $1")
                     .bind(clip_id)
                     .execute(&background_data.db_pool)
                     .await;
             } else {
-                log!([DEBUG] => "[BG] SFTP upload successful for clip {}", clip_id);
+                log!([DEBUG] => "[BG] Storage upload successful for clip {}", clip_id);
                 let _ = sqlx::query("UPDATE clips SET status = 'completed' WHERE id = $1")
                     .bind(clip_id)
                     .execute(&background_data.db_pool)
                     .await;
             }
         });
+
         while let Some(chunk_result) = field.next().await {
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
+                    log!([DEBUG] => "Multipart stream chunk error for clip ID {}: {:?}", clip_id, e);
                     let io_err = std::io::Error::other(e.to_string());
                     let _ = tx.send(Err(io_err)).await;
                     break;
