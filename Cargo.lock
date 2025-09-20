@@ -5531,9 +5531,9 @@ dependencies = [
 
 [[package]]
 name = "pxfm"
-version = "0.1.23"
+version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f55f4fedc84ed39cb7a489322318976425e42a147e2be79d8f878e2884f94e84"
+checksum = "83f9b339b02259ada5c0f4a389b7fb472f933aa17ce176fd2ad98f28bb401fde"
 dependencies = [
  "num-traits",
 ]
@@ -8361,7 +8361,7 @@ dependencies = [
 
 [[package]]
 name = "wayclip-api"
-version = "0.1.71"
+version = "0.1.72"
 dependencies = [
  "actix-cors",
  "actix-extensible-rate-limit",
@@ -8419,9 +8419,9 @@ dependencies = [
 
 [[package]]
 name = "wayclip_core"
-version = "0.1.20"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a01fac95a63e12df1811c32864cd7a6e31d29f73319917648344819778ce73d7"
+checksum = "1e409310c5e54bf092a9cfd94dc63687c03d1aeda804c19142596bb81d96accb"
 dependencies = [
  "anyhow",
  "ashpd",
