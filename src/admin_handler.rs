@@ -513,8 +513,8 @@ async fn get_user_details(path: web::Path<Uuid>, data: web::Data<AppState>) -> i
             u.deleted_at,
             u.email_verified_at,
             u.two_factor_enabled,
-            s.status::TEXT as subscription_status,
-            s.current_period_end,
+            s.status::TEXT as "subscription_status?",
+            s.current_period_end as "current_period_end?",
             (
                 SELECT COALESCE(json_agg(provider), '[]'::json)
                 FROM user_credentials
