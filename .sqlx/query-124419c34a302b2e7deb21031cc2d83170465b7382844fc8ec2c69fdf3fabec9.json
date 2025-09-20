@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            u.id,\n            u.username,\n            u.email,\n            u.avatar_url,\n            u.tier as \"tier: _\",\n            u.role as \"role: _\",\n            u.is_banned,\n            u.created_at,\n            u.deleted_at,\n            u.email_verified_at,\n            u.two_factor_enabled,\n            s.status::TEXT as subscription_status,\n            s.current_period_end,\n            COALESCE(p.providers, '[]'::json) as \"connected_providers!\"\n        FROM\n            users u\n        LEFT JOIN\n            subscriptions s ON u.id = s.user_id\n        LEFT JOIN\n            (\n                SELECT user_id, json_agg(provider) as providers\n                FROM user_credentials\n                GROUP BY user_id\n            ) p ON u.id = p.user_id\n        WHERE\n            u.id = $1\n        ",
+  "query": "\n        SELECT\n            u.id,\n            u.username,\n            u.email,\n            u.avatar_url,\n            u.tier as \"tier: _\",\n            u.role as \"role: _\",\n            u.is_banned,\n            u.created_at,\n            u.deleted_at,\n            u.email_verified_at,\n            u.two_factor_enabled,\n            s.status::TEXT as subscription_status,\n            s.current_period_end,\n            (\n                SELECT COALESCE(json_agg(provider), '[]'::json)\n                FROM user_credentials\n                WHERE user_id = u.id\n            ) as \"connected_providers!\"\n        FROM\n            users u\n        LEFT JOIN\n            subscriptions s ON u.id = s.user_id\n        WHERE\n            u.id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -118,5 +118,5 @@
       null
     ]
   },
-  "hash": "a4f11941e24e181342ecdf1e62706ee3f35c85730d37df2db018982e9b486921"
+  "hash": "124419c34a302b2e7deb21031cc2d83170465b7382844fc8ec2c69fdf3fabec9"
 }

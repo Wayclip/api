@@ -515,17 +515,15 @@ async fn get_user_details(path: web::Path<Uuid>, data: web::Data<AppState>) -> i
             u.two_factor_enabled,
             s.status::TEXT as subscription_status,
             s.current_period_end,
-            COALESCE(p.providers, '[]'::json) as "connected_providers!"
+            (
+                SELECT COALESCE(json_agg(provider), '[]'::json)
+                FROM user_credentials
+                WHERE user_id = u.id
+            ) as "connected_providers!"
         FROM
             users u
         LEFT JOIN
             subscriptions s ON u.id = s.user_id
-        LEFT JOIN
-            (
-                SELECT user_id, json_agg(provider) as providers
-                FROM user_credentials
-                GROUP BY user_id
-            ) p ON u.id = p.user_id
         WHERE
             u.id = $1
         "#,
