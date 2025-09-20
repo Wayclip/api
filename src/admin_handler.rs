@@ -1,11 +1,11 @@
 use crate::AppState;
-use actix_web::{get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
+use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::types::chrono::Utc;
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{SubscriptionTier, UserRole};
+use wayclip_core::models::{HostedClipInfo, SubscriptionTier, UserRole};
 
 #[derive(Serialize, sqlx::FromRow)]
 struct UserAdminInfo {
@@ -89,6 +89,17 @@ async fn validate_and_use_token(
         Ok((record.clip_id, record.user_id))
     } else {
         Err(HttpResponse::Forbidden().body("Invalid, expired, or already used token."))
+    }
+}
+
+#[get("/ignore/{token}")]
+async fn ignore_report(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+    match validate_and_use_token(*token, &data.db_pool).await {
+        Ok(_) => {
+            log!([DEBUG] => "Report with token {} ignored successfully.", *token);
+            HttpResponse::Ok().body("Report has been ignored and the token invalidated.")
+        }
+        Err(response) => response,
     }
 }
 
@@ -321,6 +332,164 @@ async fn unban_user(path: web::Path<Uuid>, data: web::Data<AppState>) -> impl Re
         Ok(_) => HttpResponse::NotFound().json(json!({ "message": "User not found." })),
         Err(e) => {
             log!([DEBUG] => "Failed to unban user: {:?}", e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
+#[post("/users/{id}/ban")]
+async fn ban_user(path: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+    let user_id = *path;
+    log!([DEBUG] => "Admin banning user {}", user_id);
+    match sqlx::query("UPDATE users SET is_banned = TRUE WHERE id = $1")
+        .bind(user_id)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(res) if res.rows_affected() > 0 => {
+            HttpResponse::Ok().json(json!({ "message": "User has been banned." }))
+        }
+        Ok(_) => HttpResponse::NotFound().json(json!({ "message": "User not found." })),
+        Err(e) => {
+            log!([DEBUG] => "Failed to ban user: {:?}", e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
+#[delete("/users/{id}")]
+async fn delete_user(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let admin_id = req.extensions().get::<Uuid>().cloned().unwrap();
+    let user_id = *path;
+
+    if admin_id == user_id {
+        return HttpResponse::Forbidden().body("Admins cannot delete their own account.");
+    }
+
+    log!([DEBUG] => "Admin {} initiating permanent deletion of user {}", admin_id, user_id);
+
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+
+    let clips_to_delete: Vec<(String,)> =
+        match sqlx::query_as("SELECT public_url FROM clips WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await
+        {
+            Ok(clips) => clips,
+            Err(e) => {
+                log!([DEBUG] => "Error fetching clips for deletion for user {}: {:?}", user_id, e);
+                tx.rollback().await.ok();
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
+
+    for (public_url,) in clips_to_delete {
+        if let Err(e) = data.storage.delete(&public_url).await {
+            log!([DEBUG] => "Failed to delete file {} from storage for user {}: {:?}", public_url, user_id, e);
+        }
+    }
+
+    let queries = [
+        sqlx::query("DELETE FROM clips WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await,
+        sqlx::query("DELETE FROM user_credentials WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await,
+        sqlx::query("DELETE FROM email_verification_tokens WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await,
+        sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await,
+        sqlx::query("DELETE FROM user_recovery_codes WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await,
+        sqlx::query("DELETE FROM subscriptions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await,
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await,
+    ];
+
+    for result in queries {
+        if let Err(e) = result {
+            log!([DEBUG] => "Error during user {} deletion transaction: {:?}", user_id, e);
+            tx.rollback().await.ok();
+            return HttpResponse::InternalServerError().body("Failed to delete all user data.");
+        }
+    }
+
+    if tx.commit().await.is_err() {
+        return HttpResponse::InternalServerError().body("Failed to commit user deletion.");
+    }
+
+    log!([DEBUG] => "Successfully deleted user {}", user_id);
+    HttpResponse::Ok().json(json!({ "message": "User permanently deleted." }))
+}
+
+#[get("/users/{id}/clips")]
+async fn get_user_clips(path: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+    let user_id = *path;
+    match sqlx::query_as::<_, HostedClipInfo>(
+        "SELECT id, file_name, file_size, created_at FROM clips WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(clips) => HttpResponse::Ok().json(clips),
+        Err(e) => {
+            log!([DEBUG] => "Admin failed to fetch clips for user {}: {:?}", user_id, e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
+#[delete("/clips/{id}")]
+async fn delete_clip_by_admin(path: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+    let clip_id = *path;
+    log!([DEBUG] => "Admin request to delete clip {}", clip_id);
+
+    let clip_to_delete = match sqlx::query!("SELECT public_url FROM clips WHERE id = $1", clip_id)
+        .fetch_optional(&data.db_pool)
+        .await
+    {
+        Ok(Some(clip)) => clip,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+
+    if let Err(e) = data.storage.delete(&clip_to_delete.public_url).await {
+        log!([DEBUG] => "Admin failed to delete {} from storage: {:?}", clip_to_delete.public_url, e);
+    }
+
+    match sqlx::query!("DELETE FROM clips WHERE id = $1", clip_id)
+        .execute(&data.db_pool)
+        .await
+    {
+        Ok(res) if res.rows_affected() > 0 => {
+            HttpResponse::Ok().json(json!({"message": "Clip deleted."}))
+        }
+        Ok(_) => HttpResponse::NotFound().finish(),
+        Err(e) => {
+            log!([DEBUG] => "Admin failed to delete clip {} from DB: {:?}", clip_id, e);
             HttpResponse::InternalServerError().finish()
         }
     }
