@@ -8361,7 +8361,7 @@ dependencies = [
 
 [[package]]
 name = "wayclip-api"
-version = "0.1.76"
+version = "0.1.78"
 dependencies = [
  "actix-cors",
  "actix-extensible-rate-limit",
@@ -8419,9 +8419,9 @@ dependencies = [
 
 [[package]]
 name = "wayclip_core"
-version = "0.1.22"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e409310c5e54bf092a9cfd94dc63687c03d1aeda804c19142596bb81d96accb"
+checksum = "13a67e0cb9bd1b862152f726405f23e2caacb9165ae510c735614f1f866c5fb6"
 dependencies = [
  "anyhow",
  "ashpd",

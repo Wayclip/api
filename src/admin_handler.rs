@@ -536,7 +536,7 @@ async fn get_user_details(path: web::Path<Uuid>, data: web::Data<AppState>) -> i
         Ok(details) => HttpResponse::Ok().json(details),
         Err(sqlx::Error::RowNotFound) => HttpResponse::NotFound().finish(),
         Err(e) => {
-            log!([DEBUG] => "Failed to fetch full user details: {:?}", e);
+            log!([DEBUG] => "Failed to fetch full user details for user {}: {:?}", user_id, e);
             HttpResponse::InternalServerError().finish()
         }
     }
