@@ -1306,14 +1306,27 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
     };
 
     let storage_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
-    let user_profile = UserProfile {
-        user,
-        storage_used: stats.total_size.unwrap_or(0),
-        storage_limit,
-        clip_count: stats.clip_count.unwrap_or(0),
-        connected_accounts,
-    };
-    HttpResponse::Ok().json(user_profile)
+
+    let profile = json!({
+        "id": user.id,
+        "github_id": user.github_id,
+        "username": user.username,
+        "email": user.email,
+        "avatar_url": user.avatar_url,
+        "tier": user.tier,
+        "is_banned": user.is_banned,
+        "two_factor_enabled": user.two_factor_enabled,
+        "email_verified_at": user.email_verified_at,
+        "role": user.role,
+        "last_login_at": user.last_login_at,
+        "last_login_ip": user.last_login_ip,
+        "storage_used": stats.total_size.unwrap_or(0),
+        "storage_limit": storage_limit,
+        "clip_count": stats.clip_count.unwrap_or(0),
+        "connected_accounts": connected_accounts,
+    });
+
+    HttpResponse::Ok().json(profile)
 }
 
 #[delete("/oauth/unlink/{provider}")]
