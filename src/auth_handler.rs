@@ -89,6 +89,34 @@ pub struct ResetPasswordPayload {
     password: String,
 }
 
+fn build_auth_cookie(
+    name: &str,
+    value: &str,
+    expires: Option<actix_web::cookie::time::OffsetDateTime>,
+) -> Cookie<'static> {
+    let frontend_url =
+        env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+
+    let owned_name = name.to_owned();
+    let owned_value = value.to_owned();
+
+    let mut cookie_builder = Cookie::build(owned_name, owned_value)
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .same_site(SameSite::None);
+
+    if !frontend_url.contains("localhost") {
+        cookie_builder = cookie_builder.domain(".wayclip.com");
+    }
+
+    if let Some(expiry_time) = expires {
+        cookie_builder = cookie_builder.expires(expiry_time);
+    }
+
+    cookie_builder.finish()
+}
+
 async fn is_device_recognized(
     db: &PgPool,
     user_id: Uuid,
@@ -299,17 +327,10 @@ async fn finalize_login(
             .append_header((LOCATION, deep_link))
             .finish()
     } else {
+        let auth_cookie = build_auth_cookie("token", &final_jwt, None);
         HttpResponse::Found()
             .append_header((LOCATION, final_redirect_str))
-            .cookie(
-                Cookie::build("token", final_jwt)
-                    .path("/")
-                    .domain(".wayclip.com")
-                    .secure(true)
-                    .http_only(true)
-                    .same_site(SameSite::None)
-                    .finish(),
-            )
+            .cookie(auth_cookie)
             .finish()
     }
 }
@@ -1244,16 +1265,9 @@ async fn two_factor_authenticate(
         } else {
             "2FA validation successful"
         };
+        let auth_cookie = build_auth_cookie("token", &jwt, None);
         return HttpResponse::Ok()
-            .cookie(
-                Cookie::build("token", jwt)
-                    .path("/")
-                    .domain(".wayclip.com")
-                    .secure(true)
-                    .http_only(true)
-                    .same_site(SameSite::None)
-                    .finish(),
-            )
+            .cookie(auth_cookie)
             .json(serde_json::json!({ "success": true, "message": message }));
     }
 
@@ -1388,15 +1402,8 @@ async fn delete_account(req: HttpRequest, data: web::Data<AppState>) -> impl Res
 
 #[post("/logout")]
 async fn logout() -> impl Responder {
-    let cookie = Cookie::build("token", "")
-        .path("/")
-        .domain(".wayclip.com")
-        .expires(actix_web::cookie::time::OffsetDateTime::now_utc() - Duration::days(1))
-        .secure(true)
-        .http_only(true)
-        .same_site(SameSite::None)
-        .finish();
-
+    let expiry = actix_web::cookie::time::OffsetDateTime::now_utc() - Duration::days(1);
+    let cookie = build_auth_cookie("token", "", Some(expiry));
     HttpResponse::Ok()
         .cookie(cookie)
         .json(serde_json::json!({ "message": "Logged out successfully." }))
@@ -1420,16 +1427,9 @@ async fn logout_all_devices(req: HttpRequest, data: web::Data<AppState>) -> impl
         Ok(_) => {
             log!([DEBUG] => "User {} logged out all other devices.", user_id);
             let new_jwt = jwt::create_jwt(user_id, &new_stamp, false).unwrap();
+            let auth_cookie = build_auth_cookie("token", &new_jwt, None);
             HttpResponse::Ok()
-                .cookie(
-                    Cookie::build("token", new_jwt)
-                        .path("/")
-                        .domain(".wayclip.com")
-                        .secure(true)
-                        .http_only(true)
-                        .same_site(SameSite::None)
-                        .finish(),
-                )
+                .cookie(auth_cookie)
                 .json(serde_json::json!({ "message": "All other sessions have been logged out." }))
         }
         Err(e) => {
