@@ -24,9 +24,7 @@ use totp_rs::{Algorithm, Secret, TOTP};
 use url::Url;
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{
-    CredentialProvider, DiscordUser, GitHubUser, GoogleUser, User, UserProfile,
-};
+use wayclip_core::models::{CredentialProvider, DiscordUser, GitHubUser, GoogleUser, User};
 
 const MIN_PASSWORD_LENGTH: usize = 8;
 
@@ -1317,6 +1315,7 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
         "is_banned": user.is_banned,
         "two_factor_enabled": user.two_factor_enabled,
         "email_verified_at": user.email_verified_at,
+        "created_at": user.created_at,
         "role": user.role,
         "last_login_at": user.last_login_at,
         "last_login_ip": user.last_login_ip,
