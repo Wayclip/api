@@ -113,7 +113,7 @@ pub async fn share_clip_upload(
         let mut field = field_result?;
         let (tx, rx) = mpsc::channel(4);
         let background_data = data.clone();
-        
+
         actix_web::rt::spawn(async move {
             log!([DEBUG] => "[BG] Starting background storage upload for clip ID: {}", clip_id);
             let stream = ReceiverStream::new(rx);
@@ -158,6 +158,14 @@ pub async fn share_clip_upload(
     } else {
         Err(actix_web::error::ErrorBadRequest("No file in upload body."))
     }
+}
+
+fn sanitize_display_name(name: &str) -> String {
+    let mut display_name = name.trim().to_string();
+    if display_name.ends_with(".mp4") {
+        display_name = display_name[..display_name.len() - 4].to_string();
+    }
+    display_name.replace('_', " ")
 }
 
 struct ClipDetails {
@@ -205,7 +213,8 @@ pub async fn serve_clip(
         }
     };
 
-    let escaped_file_name = html_escape::encode_text(&clip_details.file_name);
+    let display_name = sanitize_display_name(&clip_details.file_name);
+    let escaped_file_name = html_escape::encode_text(&display_name);
     let escaped_username = html_escape::encode_text(&clip_details.username);
 
     let clip_url = format!("{}/clip/{}", settings.public_url, clip_details.id);
@@ -357,6 +366,7 @@ pub async fn report_clip(
                 return HttpResponse::InternalServerError().finish();
             }
 
+            let display_name = sanitize_display_name(&report.file_name);
             let clip_url = format!("{}/clip/{}", settings.public_url, report.clip_id);
             let ban_url = format!("{}/admin/ban/{}", settings.public_url, new_token);
             let remove_url = format!("{}/admin/remove/{}", settings.public_url, new_token);
@@ -382,6 +392,11 @@ pub async fn report_clip(
                             "name": "Reporter IP",
                             "value": reporter_ip,
                             "inline": true
+                        },
+                        {
+                            "name": "File Name",
+                            "value": display_name,
+                            "inline": false
                         },
                         {
                             "name": "Actions",
@@ -537,6 +552,7 @@ pub async fn serve_clip_oembed(
         Err(_) => return HttpResponse::NotFound().finish(),
     };
 
+    let display_name = sanitize_display_name(&clip_details.file_name);
     let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
     let uploader_avatar = clip_details
         .avatar_url
@@ -552,7 +568,7 @@ pub async fn serve_clip_oembed(
         "thumbnail_url": uploader_avatar,
         "thumbnail_width": 128,
         "thumbnail_height": 128,
-        "title": clip_details.file_name,
+        "title": display_name,
         "video": {
             "url": raw_url,
             "width": 1280,
