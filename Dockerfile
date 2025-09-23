@@ -77,5 +77,8 @@ RUN mkdir -p /usr/src/app
 COPY --from=builder /out/wayclip-api /usr/local/bin/
 COPY --from=builder /out/sqlx /usr/local/bin/
 COPY --from=builder /usr/src/app/migrations /usr/src/app/migrations
+COPY --from=builder /usr/src/app/assets /usr/src/app/assets
+
+WORKDIR /usr/src/app
 
 ENTRYPOINT ["/usr/local/bin/wayclip-api"]
