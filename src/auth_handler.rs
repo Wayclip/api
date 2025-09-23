@@ -24,7 +24,9 @@ use totp_rs::{Algorithm, Secret, TOTP};
 use url::Url;
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{CredentialProvider, DiscordUser, GitHubUser, GoogleUser, User};
+use wayclip_core::models::{
+    CredentialProvider, DiscordUser, GitHubUser, GoogleUser, User, UserProfile,
+};
 
 const MIN_PASSWORD_LENGTH: usize = 8;
 
@@ -1299,31 +1301,19 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
     .fetch_all(&data.db_pool)
     .await
     {
-        Ok(providers) => providers.into_iter().map(|(p,)| p).collect(),
+        Ok(providers) => providers,
         Err(_) => vec![],
     };
 
     let storage_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
 
-    let profile = json!({
-        "id": user.id,
-        "github_id": user.github_id,
-        "username": user.username,
-        "email": user.email,
-        "avatar_url": user.avatar_url,
-        "tier": user.tier,
-        "is_banned": user.is_banned,
-        "two_factor_enabled": user.two_factor_enabled,
-        "email_verified_at": user.email_verified_at,
-        "created_at": user.created_at,
-        "role": user.role,
-        "last_login_at": user.last_login_at,
-        "last_login_ip": user.last_login_ip,
-        "storage_used": stats.total_size.unwrap_or(0),
-        "storage_limit": storage_limit,
-        "clip_count": stats.clip_count.unwrap_or(0),
-        "connected_accounts": connected_accounts,
-    });
+    let profile = UserProfile {
+        user,
+        storage_used: stats.total_size.unwrap_or(0),
+        storage_limit,
+        clip_count: stats.clip_count.unwrap_or(0),
+        connected_accounts: connected_accounts.into_iter().map(|(p,)| p).collect(),
+    };
 
     HttpResponse::Ok().json(profile)
 }
