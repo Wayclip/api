@@ -216,13 +216,13 @@ async fn main() -> std::io::Result<()> {
                     .service(auth_handler::forgot_password)
                     .service(auth_handler::reset_password)
                     .service(auth_handler::resend_verification_email)
-                    .service(auth_handler::logout)
-                    .service(auth_handler::logout_all_devices) // New endpoint
                     .service(auth_handler::two_factor_authenticate),
             )
             .service(
                 web::scope("/api")
                     .wrap(middleware::Auth)
+                    .service(auth_handler::logout)
+                    .service(auth_handler::logout_all_devices)
                     .service(clip_handler::get_clips_index)
                     .service(clip_handler::delete_clip)
                     .service(auth_handler::get_me)
