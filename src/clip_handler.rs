@@ -347,86 +347,90 @@ pub async fn report_clip(
     .await;
 
     if let Ok(report) = report_data {
-        if let Some(url) = &settings.discord_webhook_url {
-            let new_token = Uuid::new_v4();
-            let expiration_time = Utc::now() + Duration::hours(24);
+        let new_token = Uuid::new_v4();
+        let expiration_time = Utc::now() + Duration::hours(24);
 
-            let db_result = sqlx::query!(
-                "INSERT INTO report_tokens (token, clip_id, user_id, expires_at) VALUES ($1, $2, $3, $4)",
-                new_token,
-                report.clip_id,
-                report.user_id,
-                expiration_time
-            )
-            .execute(&data.db_pool)
-            .await;
+        let db_result = sqlx::query!(
+        "INSERT INTO report_tokens (token, clip_id, user_id, expires_at) VALUES ($1, $2, $3, $4)",
+        new_token,
+        report.clip_id,
+        report.user_id,
+        expiration_time
+    )
+        .execute(&data.db_pool)
+        .await;
 
-            if let Err(e) = db_result {
-                log!([DEBUG] => "ERROR: Failed to create report token: {}", e);
-                return HttpResponse::InternalServerError().finish();
-            }
+        if let Err(e) = db_result {
+            log!([DEBUG] => "ERROR: Failed to create report token: {}", e);
+            return HttpResponse::InternalServerError().finish();
+        }
 
-            let display_name = sanitize_display_name(&report.file_name);
-            let clip_url = format!("{}/clip/{}", settings.public_url, report.clip_id);
-            let ban_url = format!("{}/admin/ban/{}", settings.public_url, new_token);
-            let remove_url = format!("{}/admin/remove/{}", settings.public_url, new_token);
-            let reporter_ip = req
-                .connection_info()
-                .realip_remote_addr()
-                .unwrap_or("unknown")
-                .to_string();
-            log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
+        if settings.discord_notifications.unwrap_or(false) {
+            if let Some(url) = &settings.discord_webhook_url {
+                if let Some(user_id) = &settings.discord_userid {
+                    let display_name = sanitize_display_name(&report.file_name);
+                    let clip_url = format!("{}/clip/{}", settings.public_url, report.clip_id);
+                    let ban_url = format!("{}/admin/ban/{}", settings.public_url, new_token);
+                    let remove_url = format!("{}/admin/remove/{}", settings.public_url, new_token);
+                    let reporter_ip = req
+                        .connection_info()
+                        .realip_remote_addr()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
 
-            let message = serde_json::json!({
-                "content": "🚨 New Clip Report! <@564472732071493633>",
-                "embeds": [{
-                    "title": "Reported Clip Details",
-                    "color": 15158332,
-                    "fields": [
-                        {
-                            "name": "Uploader",
-                            "value": format!("{} (`{}`)", report.username, report.user_id),
-                            "inline": true
-                        },
-                        {
-                            "name": "Reporter IP",
-                            "value": reporter_ip,
-                            "inline": true
-                        },
-                        {
-                            "name": "File Name",
-                            "value": display_name,
-                            "inline": false
-                        },
-                        {
-                            "name": "Actions",
-                            "value": format!(
-                                "🔗 [View Clip]({})\n🔨 [Ban User & IP]({})\n🗑️ [Remove Video]({})",
-                                clip_url, ban_url, remove_url
-                            )
+                    let message = serde_json::json!({
+                        "content": format!("🚨 New Clip Report! <@{}>", user_id),
+                        "embeds": [{
+                            "title": "Reported Clip Details",
+                            "color": 15158332,
+                            "fields": [
+                                {
+                                    "name": "Uploader",
+                                    "value": format!("{} (`{}`)", report.username, report.user_id),
+                                    "inline": true
+                                },
+                                {
+                                    "name": "Reporter IP",
+                                    "value": reporter_ip,
+                                    "inline": true
+                                },
+                                {
+                                    "name": "File Name",
+                                    "value": display_name,
+                                    "inline": false
+                                },
+                                {
+                                    "name": "Actions",
+                                    "value": format!(
+                                        "🔗 [View Clip]({})\n🔨 [Ban User]({})\n🗑️ [Remove Video]({})",
+                                        clip_url, ban_url, remove_url
+                                    )
+                                }
+                            ]
+                        }]
+                    });
+
+                    let client = reqwest::Client::new();
+                    let response = client.post(url).json(&message).send().await;
+
+                    match response {
+                        Ok(res) => {
+                            if !res.status().is_success() {
+                                let status = res.status();
+                                let error_body = res
+                                    .text()
+                                    .await
+                                    .unwrap_or_else(|_| "Could not read response body".to_string());
+                                log!([DEBUG] => "ERROR: Discord webhook failed. Status: {}. Body: {}", status, error_body);
+                            } else {
+                                log!([DEBUG] => "Successfully sent Discord notification.");
+                            }
                         }
-                    ]
-                }]
-            });
-
-            let client = reqwest::Client::new();
-            let response = client.post(url).json(&message).send().await;
-
-            match response {
-                Ok(res) => {
-                    if !res.status().is_success() {
-                        let status = res.status();
-                        let error_body = res
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Could not read response body".to_string());
-                        log!([DEBUG] => "ERROR: Discord webhook failed. Status: {}. Body: {}", status, error_body);
-                    } else {
-                        log!([DEBUG] => "Successfully sent Discord notification.");
+                        Err(e) => {
+                            log!([DEBUG] => "ERROR: Failed to send Discord notification request: {}", e);
+                        }
                     }
-                }
-                Err(e) => {
-                    log!([DEBUG] => "ERROR: Failed to send Discord notification request: {}", e);
                 }
             }
         }

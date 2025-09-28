@@ -8,14 +8,18 @@ pub struct Settings {
     pub storage_type: String,
     pub public_url: String,
     pub local_storage_path: Option<String>,
+
+    pub discord_notifications: Option<bool>,
     pub discord_webhook_url: Option<String>,
+    pub discord_userid: Option<String>,
+
     pub sftp_host: Option<String>,
     pub sftp_port: Option<u16>,
     pub sftp_user: Option<String>,
     pub sftp_password: Option<String>,
     pub sftp_remote_path: Option<String>,
 
-    pub limit_free: String,
+    pub limit_tier0: String,
     pub limit_tier1: String,
     pub limit_tier2: String,
     pub limit_tier3: String,
@@ -35,7 +39,7 @@ impl Settings {
         let mut map = HashMap::new();
         map.insert(
             SubscriptionTier::Free,
-            parse_size(&self.limit_free).expect("Invalid format for LIMIT_FREE"),
+            parse_size(&self.limit_tier0).expect("Invalid format for LIMIT_TIER0"),
         );
         map.insert(
             SubscriptionTier::Tier1,

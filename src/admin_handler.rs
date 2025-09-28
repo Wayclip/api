@@ -250,7 +250,6 @@ async fn get_admin_dashboard(data: web::Data<AppState>) -> impl Responder {
             HttpResponse::Ok().json(AdminDashboardData {
                 users,
                 reported_clips,
-                // FIX: Use `unwrap_or(0)` to handle the Option<i64> correctly.
                 total_data_usage: total_usage.unwrap_or(0),
             })
         }
