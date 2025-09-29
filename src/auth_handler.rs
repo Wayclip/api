@@ -328,10 +328,9 @@ async fn finalize_login(
             .finish()
     } else {
         let auth_cookie = build_auth_cookie("token", &final_jwt, None);
-        HttpResponse::Found()
-            .append_header((LOCATION, final_redirect_str))
+        HttpResponse::Ok()
             .cookie(auth_cookie)
-            .finish()
+            .json(serde_json::json!({ "success": true }))
     }
 }
 
