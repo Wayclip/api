@@ -5,19 +5,7 @@
     "columns": [],
     "parameters": {
       "Left": [
-        {
-          "Custom": {
-            "name": "subscription_tier",
-            "kind": {
-              "Enum": [
-                "free",
-                "tier1",
-                "tier2",
-                "tier3"
-              ]
-            }
-          }
-        },
+        "Text",
         "Uuid"
       ]
     },

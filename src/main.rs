@@ -20,7 +20,7 @@ use std::time::Duration;
 use stripe::Client;
 use tracing_actix_web::TracingLogger;
 use wayclip_core::log;
-use wayclip_core::models::SubscriptionTier;
+use wayclip_core::models::TierConfig;
 
 mod admin_handler;
 mod auth_handler;
@@ -39,9 +39,11 @@ pub struct AppState {
     github_oauth_client: BasicClient,
     google_oauth_client: BasicClient,
     discord_oauth_client: BasicClient,
+    frontend_url: String,
     storage: Arc<dyn Storage>,
-    tier_limits: Arc<HashMap<SubscriptionTier, i64>>,
     mailer: mailer::Mailer,
+    payments_enabled: bool,
+    tiers: Arc<HashMap<String, TierConfig>>,
 }
 
 async fn seed_initial_admins(db_pool: &PgPool) {
@@ -71,6 +73,55 @@ async fn seed_initial_admins(db_pool: &PgPool) {
     }
 }
 
+async fn init_plans(pool: &PgPool) {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM plans")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    if count == 0 {
+        let json = env::var("TIERS_JSON").unwrap_or_else(|_| "[]".to_string());
+        let parsed: Vec<TierConfig> = serde_json::from_str(&json).unwrap_or_default();
+
+        for t in parsed {
+            let _ = sqlx::query(
+                "INSERT INTO plans (name, max_storage_bytes, stripe_price_id) VALUES ($1, $2, $3)",
+            )
+            .bind(t.name)
+            .bind(t.max_storage_bytes as i64)
+            .bind(t.stripe_price_id)
+            .execute(pool)
+            .await;
+        }
+    }
+}
+
+async fn load_tiers_from_db(pool: &PgPool) -> HashMap<String, TierConfig> {
+    struct TierConfigDb {
+        name: String,
+        max_storage_bytes: i64,
+        stripe_price_id: Option<String>,
+    }
+
+    sqlx::query_as!(
+        TierConfigDb,
+        "SELECT name, max_storage_bytes, stripe_price_id FROM plans"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|db_tier| {
+        let tier_config = TierConfig {
+            name: db_tier.name.clone(),
+            max_storage_bytes: db_tier.max_storage_bytes as u64,
+            stripe_price_id: db_tier.stripe_price_id,
+        };
+        (db_tier.name, tier_config)
+    })
+    .collect()
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
@@ -83,6 +134,8 @@ async fn main() -> std::io::Result<()> {
     let config = Settings::new().expect("Failed to load configuration");
     log!([DEBUG] => "Configuration loaded successfully.");
 
+    let payments_enabled = config.payments_enabled.unwrap_or(false);
+
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redirect_uri = env::var("REDIRECT_URL").expect("REDIRECT_URL must be set");
 
@@ -90,6 +143,10 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to create database pool.");
     log!([DEBUG] => "Database pool created successfully.");
+
+    init_plans(&pool).await;
+    let tiers = Arc::new(load_tiers_from_db(&pool).await);
+    log!([DEBUG] => "Tier limits loaded from database.");
 
     seed_initial_admins(&pool).await;
 
@@ -123,13 +180,17 @@ async fn main() -> std::io::Result<()> {
     )
     .set_redirect_uri(RedirectUrl::new(format!("{redirect_uri}/auth/discord/callback")).unwrap());
 
-    let stripe_secret_key = env::var("STRIPE_SECRET_KEY").expect("Missing STRIPE_SECRET_KEY");
+    let stripe_client: Option<stripe::Client> = if payments_enabled {
+        let key = env::var("STRIPE_SECRET_KEY").expect("Missing STRIPE_SECRET_KEY");
+        Some(Client::new(key))
+    } else {
+        None
+    };
+
     let redirect_url =
         RedirectUrl::new(format!("{redirect_uri}/auth/callback").to_string()).unwrap();
 
     log!([AUTH] => "OAuth2 configured with Redirect URL: {redirect_url:?}");
-
-    let stripe_client = Client::new(stripe_secret_key);
 
     let storage: Arc<dyn Storage> = match config.storage_type.as_str() {
         "LOCAL" => Arc::new(LocalStorage::new(&config)),
@@ -147,9 +208,7 @@ async fn main() -> std::io::Result<()> {
             .unwrap_or_else(|| "./uploads".to_string());
         std_fs::create_dir_all(&local_path).expect("Could not create local storage directory");
     }
-
-    let tier_limits = Arc::new(config.get_tier_limits());
-    log!([DEBUG] => "Tier limits loaded.");
+    let frontend_url = config.public_url.clone();
 
     let app_state = AppState {
         db_pool: pool,
@@ -157,7 +216,9 @@ async fn main() -> std::io::Result<()> {
         google_oauth_client,
         discord_oauth_client,
         storage,
-        tier_limits,
+        tiers,
+        frontend_url: frontend_url.clone(),
+        payments_enabled,
         mailer: mailer::Mailer::new(),
     };
 
@@ -167,12 +228,15 @@ async fn main() -> std::io::Result<()> {
     log!([DEBUG] => "Starting Actix web server on 0.0.0.0:8080...");
 
     HttpServer::new(move || {
+        let frontend_url_clone = frontend_url.clone();
+
         let cors = Cors::default()
-            .allowed_origin_fn(|origin: &HeaderValue, _req_head: &RequestHead| {
+            .allowed_origin_fn(move |origin: &HeaderValue, _req_head: &RequestHead| {
                 let allowed_origins = [
                     "http://localhost:3000",
                     "https://wayclip.com",
                     "https://dash.wayclip.com",
+                    &frontend_url_clone,
                 ];
                 if let Ok(s) = origin.to_str() {
                     allowed_origins.contains(&s)

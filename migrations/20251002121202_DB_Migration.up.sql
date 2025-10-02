@@ -1,0 +1,1 @@
+ALTER TABLE users ALTER COLUMN tier TYPE TEXT USING (tier::text);

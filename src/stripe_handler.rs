@@ -10,22 +10,16 @@ use stripe::{
 };
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{Subscription, SubscriptionStatus, SubscriptionTier, User};
+use wayclip_core::models::{SubscriptionStatus, User, UserSubscription};
 
-fn tier_from_price_id(price_id: &str) -> Option<SubscriptionTier> {
-    let basic_id = std::env::var("STRIPE_PRICE_ID_BASIC").ok()?;
-    let plus_id = std::env::var("STRIPE_PRICE_ID_PLUS").ok()?;
-    let pro_id = std::env::var("STRIPE_PRICE_ID_PRO").ok()?;
-
-    match price_id {
-        p if p == basic_id => Some(SubscriptionTier::Tier1),
-        p if p == plus_id => Some(SubscriptionTier::Tier2),
-        p if p == pro_id => Some(SubscriptionTier::Tier3),
-        _ => {
-            log!([DEBUG] => "ERROR: Unrecognized Stripe Price ID: {}", price_id);
-            None
-        }
-    }
+fn tier_from_price_id(
+    price_id: &str,
+    tiers: &HashMap<String, wayclip_core::models::TierConfig>,
+) -> Option<String> {
+    tiers
+        .values()
+        .find(|t| t.stripe_price_id.as_deref() == Some(price_id))
+        .map(|t| t.name.clone())
 }
 
 #[post("/checkout/{tier}")]
@@ -35,23 +29,25 @@ pub async fn create_checkout_session(
     user_id: web::ReqData<Uuid>,
     tier: web::Path<String>,
 ) -> impl Responder {
+    let active_tiers = &state.tiers;
+
     let tier_str = tier.into_inner();
     let user_id_val = user_id.into_inner();
 
-    let price_id = match tier_str.as_str() {
-        "basic" => std::env::var("STRIPE_PRICE_ID_BASIC").ok(),
-        "plus" => std::env::var("STRIPE_PRICE_ID_PLUS").ok(),
-        "pro" => std::env::var("STRIPE_PRICE_ID_PRO").ok(),
-        _ => None,
-    };
-
-    let price_id = match price_id {
-        Some(id) => id,
+    let price_id = match active_tiers.get(&tier_str) {
+        Some(t) => t.stripe_price_id.clone(),
         None => {
             log!([DEBUG] => "ERROR: Invalid subscription tier provided: {}", tier_str);
             return HttpResponse::BadRequest().json("Invalid subscription tier");
         }
     };
+
+    if price_id.is_none() {
+        log!([DEBUG] => "ERROR: Tier '{}' does not have a Stripe price ID", tier_str);
+        return HttpResponse::BadRequest().json("Invalid subscription tier");
+    }
+
+    let price_id = price_id.unwrap();
 
     log!([DEBUG] => "Creating checkout session for user {} with tier '{}'", user_id_val, tier_str);
 
@@ -66,12 +62,15 @@ pub async fn create_checkout_session(
 
     let user_id_str = &user.id.to_string();
 
+    // Might need more tuning
     let mut session_params = CreateCheckoutSession {
         success_url: Some(
             "https://dash.wayclip.com/payment/verify?session_id={CHECKOUT_SESSION_ID}",
         ),
         cancel_url: Some("https://dash.wayclip.com/payment/cancel"),
+        return_url: Some("https://dash.wayclip.com/dash"),
         client_reference_id: Some(user_id_str),
+        allow_promotion_codes: Some(true),
         payment_method_types: Some(vec![CreateCheckoutSessionPaymentMethodTypes::Card]),
         mode: Some(stripe::CheckoutSessionMode::Subscription),
         line_items: Some(vec![CreateCheckoutSessionLineItems {
@@ -142,7 +141,7 @@ pub async fn cancel_subscription(
     state: web::Data<AppState>,
     user_id: web::ReqData<Uuid>,
 ) -> impl Responder {
-    let subscription = match sqlx::query_as::<_, Subscription>(
+    let subscription = match sqlx::query_as::<_, UserSubscription>(
         "SELECT * FROM subscriptions WHERE user_id = $1 AND status = 'active'",
     )
     .bind(user_id.into_inner())
@@ -298,7 +297,7 @@ async fn handle_checkout_session_completed(
         }
     };
 
-    let tier = match tier_from_price_id(&price_id) {
+    let tier_name = match tier_from_price_id(&price_id, &state.tiers) {
         Some(t) => t,
         None => {
             log!([DEBUG] => "ERROR: Could not map price ID {} to a tier for sub {}", price_id, stripe_sub_id);
@@ -315,7 +314,7 @@ async fn handle_checkout_session_completed(
     };
 
     if let Err(e) = sqlx::query("UPDATE users SET tier = $1, stripe_customer_id = $2 WHERE id = $3")
-        .bind(tier as SubscriptionTier)
+        .bind(&tier_name)
         .bind(&stripe_customer_id)
         .bind(user_id)
         .execute(&mut *tx)
@@ -400,7 +399,13 @@ async fn handle_subscription_updated(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    let tier = tier_from_price_id(&price_id).unwrap_or(SubscriptionTier::Free);
+    let tier_name = tier_from_price_id(&price_id, &state.tiers).unwrap_or("Free".to_string());
+
+    let final_tier_name = if status == SubscriptionStatus::Active {
+        tier_name
+    } else {
+        "Free".to_string()
+    };
 
     let (start_date, end_date) = (
         DateTime::from_timestamp(sub.current_period_start, 0),
@@ -442,15 +447,9 @@ async fn handle_subscription_updated(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    let final_tier = if status == SubscriptionStatus::Active {
-        tier
-    } else {
-        SubscriptionTier::Free
-    };
-
     if let Err(e) = sqlx::query!(
         "UPDATE users SET tier = $1 WHERE id = $2",
-        final_tier as SubscriptionTier,
+        final_tier_name,
         user_id
     )
     .execute(&state.db_pool)
@@ -491,7 +490,7 @@ async fn handle_subscription_deleted(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'free' WHERE id = $1", user_id)
+    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'Free' WHERE id = $1", user_id)
         .execute(&state.db_pool)
         .await
     {
@@ -553,7 +552,7 @@ async fn handle_charge_dispute_created(
         }
     };
 
-    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'free' WHERE id = $1", user_id)
+    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'Free' WHERE id = $1", user_id)
         .execute(&state.db_pool)
         .await
     {

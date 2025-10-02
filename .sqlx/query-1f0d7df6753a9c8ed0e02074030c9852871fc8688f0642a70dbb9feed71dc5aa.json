@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            u.id, u.username, u.email,\n            u.tier as \"tier: _\",\n            u.is_banned,\n            u.role as \"role: _\",\n            -- CHANGE: Cast aggregate results to BIGINT for proper mapping to i64\n            COALESCE(c.clip_count, 0)::BIGINT as \"clip_count!\",\n            COALESCE(c.total_size, 0)::BIGINT as \"data_used!\"\n        FROM users u\n        LEFT JOIN (\n            -- CHANGE: Cast aggregate results to BIGINT\n            SELECT user_id, COUNT(*)::BIGINT as clip_count, SUM(file_size)::BIGINT as total_size\n            FROM clips GROUP BY user_id\n        ) c ON u.id = c.user_id\n        ORDER BY u.created_at DESC\n        ",
+  "query": "\n        SELECT\n            u.id, u.username, u.email,\n            u.tier,\n            u.is_banned,\n            u.role as \"role: _\",\n            COALESCE(c.clip_count, 0)::BIGINT as \"clip_count!\",\n            COALESCE(c.total_size, 0)::BIGINT as \"data_used!\"\n        FROM users u\n        LEFT JOIN (\n            SELECT user_id, COUNT(*)::BIGINT as clip_count, SUM(file_size)::BIGINT as total_size\n            FROM clips GROUP BY user_id\n        ) c ON u.id = c.user_id\n        ORDER BY u.created_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -20,20 +20,8 @@
       },
       {
         "ordinal": 3,
-        "name": "tier: _",
-        "type_info": {
-          "Custom": {
-            "name": "subscription_tier",
-            "kind": {
-              "Enum": [
-                "free",
-                "tier1",
-                "tier2",
-                "tier3"
-              ]
-            }
-          }
-        }
+        "name": "tier",
+        "type_info": "Text"
       },
       {
         "ordinal": 4,
@@ -80,5 +68,5 @@
       null
     ]
   },
-  "hash": "9dcbb6bfe530f74274dc75c51a15586d80e59b9cb575f42e6a1a46728e814ecb"
+  "hash": "1f0d7df6753a9c8ed0e02074030c9852871fc8688f0642a70dbb9feed71dc5aa"
 }

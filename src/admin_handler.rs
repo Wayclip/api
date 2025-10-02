@@ -5,14 +5,14 @@ use serde_json::json;
 use sqlx::types::chrono::Utc;
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{HostedClipInfo, SubscriptionTier, UserRole};
+use wayclip_core::models::{HostedClipInfo, UserRole};
 
 #[derive(Serialize, sqlx::FromRow)]
 struct UserAdminInfo {
     id: Uuid,
     username: String,
     email: Option<String>,
-    tier: SubscriptionTier,
+    tier: String,
     is_banned: bool,
     role: UserRole,
     clip_count: i64,
@@ -35,7 +35,7 @@ pub struct UpdateRolePayload {
 
 #[derive(serde::Deserialize)]
 pub struct UpdateTierPayload {
-    tier: SubscriptionTier,
+    tier: String,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -45,7 +45,7 @@ pub struct FullUserDetails {
     username: String,
     email: Option<String>,
     avatar_url: Option<String>,
-    tier: SubscriptionTier,
+    tier: String,
     role: UserRole,
     is_banned: bool,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -208,15 +208,13 @@ async fn get_admin_dashboard(data: web::Data<AppState>) -> impl Responder {
         r#"
         SELECT
             u.id, u.username, u.email,
-            u.tier as "tier: _",
+            u.tier,
             u.is_banned,
             u.role as "role: _",
-            -- CHANGE: Cast aggregate results to BIGINT for proper mapping to i64
             COALESCE(c.clip_count, 0)::BIGINT as "clip_count!",
             COALESCE(c.total_size, 0)::BIGINT as "data_used!"
         FROM users u
         LEFT JOIN (
-            -- CHANGE: Cast aggregate results to BIGINT
             SELECT user_id, COUNT(*)::BIGINT as clip_count, SUM(file_size)::BIGINT as total_size
             FROM clips GROUP BY user_id
         ) c ON u.id = c.user_id
@@ -297,10 +295,10 @@ async fn update_user_tier(
     data: web::Data<AppState>,
 ) -> impl Responder {
     let target_user_id = *path;
-    log!([DEBUG] => "Admin manually setting tier for user {} to {:?}", target_user_id, payload.tier);
+    log!([DEBUG] => "Admin manually setting tier for user {} to {}", target_user_id, payload.tier);
 
     match sqlx::query("UPDATE users SET tier = $1 WHERE id = $2")
-        .bind(payload.tier)
+        .bind(&payload.tier)
         .bind(target_user_id)
         .execute(&data.db_pool)
         .await
@@ -505,7 +503,7 @@ async fn get_user_details(path: web::Path<Uuid>, data: web::Data<AppState>) -> i
             u.username,
             u.email,
             u.avatar_url,
-            u.tier as "tier: _",
+            u.tier,
             u.role as "role: _",
             u.is_banned,
             u.created_at,

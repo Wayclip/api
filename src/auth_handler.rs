@@ -256,8 +256,7 @@ async fn upsert_oauth_user(
 
 fn handle_oauth_error(client_type: &str, message: &str) -> HttpResponse {
     if client_type == "web" {
-        let frontend_url =
-            env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        let frontend_url = env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
         let mut redirect_url = Url::parse(&format!("{frontend_url}/login")).unwrap();
         redirect_url.query_pairs_mut().append_pair("error", message);
         HttpResponse::Found()
@@ -703,14 +702,13 @@ async fn register_with_password(
         }
     };
 
-    if sqlx::query(
+    if let Err(_) = sqlx::query(
         "INSERT INTO user_credentials (user_id, provider, password_hash) VALUES ($1, 'email', $2)",
     )
     .bind(new_user.id)
     .bind(&password_hash)
     .execute(&mut *tx)
     .await
-    .is_err()
     {
         tx.rollback().await.ok();
         return HttpResponse::InternalServerError()
@@ -718,7 +716,7 @@ async fn register_with_password(
     }
 
     let verification_token = Uuid::new_v4();
-    if sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(verification_token).bind(new_user.id).execute(&mut *tx).await.is_err() {
+    if let Err(_) = sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(verification_token).bind(new_user.id).execute(&mut *tx).await {
         tx.rollback().await.ok();
         return HttpResponse::InternalServerError().json(json!({ "message": "Could not create verification token." }));
     }
@@ -767,29 +765,25 @@ async fn verify_email(token: web::Path<Uuid>, data: web::Data<AppState>) -> impl
         }
     };
 
-    if sqlx::query!(
+    if let Err(_) = sqlx::query!(
         "UPDATE users SET email_verified_at = NOW() WHERE id = $1",
         record.user_id
     )
     .execute(&mut *tx)
     .await
-    .is_err()
     {
         tx.rollback().await.ok();
         return HttpResponse::InternalServerError()
             .json(json!({ "message": "Failed to verify email." }));
     }
 
-    if sqlx::query!(
+    sqlx::query!(
         "DELETE FROM email_verification_tokens WHERE user_id = $1",
         record.user_id
     )
     .execute(&mut *tx)
     .await
-    .is_err()
-    {
-        log!([DEBUG] => "Failed to delete verification token for user {}", record.user_id);
-    }
+    .ok();
 
     if tx.commit().await.is_err() {
         return HttpResponse::InternalServerError()
@@ -845,7 +839,7 @@ async fn resend_verification_email(
     .ok();
 
     let token = Uuid::new_v4();
-    if sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(token).bind(user.id).execute(&mut *tx).await.is_err() {
+    if let Err(_) = sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')").bind(token).bind(user.id).execute(&mut *tx).await {
         tx.rollback().await.ok();
         return HttpResponse::InternalServerError().json(json!({ "message": "Could not generate new token." }));
     }
@@ -1304,7 +1298,7 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
         Err(_) => vec![],
     };
 
-    let storage_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
+    let storage_limit = data.tiers.get(&user.tier).map(|t| t.max_storage_bytes as i64).unwrap_or(0);
 
     let profile = UserProfile {
         user,

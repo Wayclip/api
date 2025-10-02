@@ -50,7 +50,7 @@ pub async fn share_clip_begin(
         return Err(actix_web::error::ErrorBadRequest("Invalid file name."));
     }
 
-    let tier_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
+    let tier_limit = data.tiers.get(&user.tier).map(|t| t.max_storage_bytes as i64).unwrap_or(0);
     let current_usage: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
     )
