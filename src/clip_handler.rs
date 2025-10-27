@@ -11,8 +11,6 @@ use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{Clip, HostedClipInfo, User};
 
-const MAX_FILE_SIZE: i64 = 1_073_741_824;
-
 #[derive(serde::Deserialize)]
 pub struct ShareBeginRequest {
     file_name: String,
@@ -24,9 +22,11 @@ pub async fn share_clip_begin(
     req: HttpRequest,
     body: web::Json<ShareBeginRequest>,
     data: web::Data<AppState>,
-    settings: web::Data<Settings>,
 ) -> Result<HttpResponse, Error> {
+    let settings = data.settings.clone();
     log!([DEBUG] => "Received clip share/begin request.");
+    let max_file_size = settings.upload_limit_bytes.unwrap_or(1024 * 1024 * 1024) as i64; // 1GiB
+
     let user_id = req
         .extensions()
         .get::<Uuid>()
@@ -50,7 +50,11 @@ pub async fn share_clip_begin(
         return Err(actix_web::error::ErrorBadRequest("Invalid file name."));
     }
 
-    let tier_limit = data.tiers.get(&user.tier).map(|t| t.max_storage_bytes as i64).unwrap_or(0);
+    let tier_limit = data
+        .tiers
+        .get(&user.tier)
+        .map(|t| t.max_storage_bytes as i64)
+        .unwrap_or(0);
     let current_usage: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
     )
@@ -59,9 +63,9 @@ pub async fn share_clip_begin(
     .await
     .unwrap_or(0);
 
-    if body.file_size > MAX_FILE_SIZE {
+    if body.file_size > max_file_size {
         return Err(actix_web::error::ErrorPayloadTooLarge(format!(
-            "File size cannot exceed {MAX_FILE_SIZE} bytes",
+            "File size cannot exceed {max_file_size} bytes",
         )));
     }
     if current_usage + body.file_size > tier_limit {
@@ -84,7 +88,7 @@ pub async fn share_clip_begin(
         actix_web::error::ErrorInternalServerError("Failed to initiate clip upload.")
     })?;
 
-    let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
+    let response_url = format!("{}/clip/{}", settings.backend_url, new_clip.id);
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "upload_id": new_clip.id,
         "url": response_url
@@ -217,13 +221,15 @@ pub async fn serve_clip(
     let escaped_file_name = html_escape::encode_text(&display_name);
     let escaped_username = html_escape::encode_text(&clip_details.username);
 
-    let clip_url = format!("{}/clip/{}", settings.public_url, clip_details.id);
-    let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
+    let clip_url = format!("{}/clip/{}", settings.backend_url, clip_details.id);
+    let raw_url = format!("{}/clip/{}/raw", settings.backend_url, clip_details.id);
     let report_url = format!("/clip/{}/report", clip_details.id);
-    let uploader_avatar = clip_details
-        .avatar_url
-        .clone()
-        .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string());
+    let uploader_avatar = clip_details.avatar_url.clone().unwrap_or_else(|| {
+        settings
+            .default_avatar_url
+            .clone()
+            .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string())
+    });
     let formatted_date = clip_details.created_at.format("%B %e, %Y").to_string();
     let iso_date = clip_details.created_at.to_rfc3339();
 
@@ -369,9 +375,9 @@ pub async fn report_clip(
             if let Some(url) = &settings.discord_webhook_url {
                 if let Some(user_id) = &settings.discord_userid {
                     let display_name = sanitize_display_name(&report.file_name);
-                    let clip_url = format!("{}/clip/{}", settings.public_url, report.clip_id);
-                    let ban_url = format!("{}/admin/ban/{}", settings.public_url, new_token);
-                    let remove_url = format!("{}/admin/remove/{}", settings.public_url, new_token);
+                    let clip_url = format!("{}/clip/{}", settings.backend_url, report.clip_id);
+                    let ban_url = format!("{}/admin/ban/{}", settings.backend_url, new_token);
+                    let remove_url = format!("{}/admin/remove/{}", settings.backend_url, new_token);
                     let reporter_ip = req
                         .connection_info()
                         .realip_remote_addr()
@@ -557,18 +563,20 @@ pub async fn serve_clip_oembed(
     };
 
     let display_name = sanitize_display_name(&clip_details.file_name);
-    let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
-    let uploader_avatar = clip_details
-        .avatar_url
-        .clone()
-        .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string());
+    let raw_url = format!("{}/clip/{}/raw", settings.backend_url, clip_details.id);
+    let uploader_avatar = clip_details.avatar_url.clone().unwrap_or_else(|| {
+        settings
+            .default_avatar_url
+            .clone()
+            .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string())
+    });
 
     let oembed_response = serde_json::json!({
         "version": "1.0",
         "type": "video",
         "author_name": clip_details.username,
-        "provider_name": "Wayclip",
-        "provider_url": settings.public_url,
+        "provider_name": settings.app_name,
+        "provider_url": settings.backend_url,
         "thumbnail_url": uploader_avatar,
         "thumbnail_width": 128,
         "thumbnail_height": 128,

@@ -1,9 +1,10 @@
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
-use std::env;
 use uuid::Uuid;
 use wayclip_core::log;
+
+use crate::settings::Settings;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -19,8 +20,9 @@ pub fn create_jwt(
     security_stamp: &Uuid,
     is_2fa_token: bool,
 ) -> Result<String, jsonwebtoken::errors::Error> {
+    let settings = Settings::new().unwrap();
+    let secret = settings.jwt_secret;
     log!([AUTH] => "Creating new JWT for user ID: {}. 2FA temp: {}", user_id, is_2fa_token);
-    let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     let now = Utc::now();
 
     let expiration = if is_2fa_token {
@@ -46,7 +48,8 @@ pub fn create_jwt(
 
 pub fn validate_jwt(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
     log!([DEBUG] => "Attempting to validate JWT...");
-    let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    let settings = Settings::new().unwrap();
+    let secret = settings.jwt_secret;
     let decoding_key = DecodingKey::from_secret(secret.as_ref());
     let validation = Validation::default();
 

@@ -29,7 +29,13 @@ pub async fn create_checkout_session(
     user_id: web::ReqData<Uuid>,
     tier: web::Path<String>,
 ) -> impl Responder {
+    let settings = state.settings.clone();
     let active_tiers = &state.tiers;
+    let frontend_url = &state.settings.frontend_url;
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
 
     let tier_str = tier.into_inner();
     let user_id_val = user_id.into_inner();
@@ -62,17 +68,31 @@ pub async fn create_checkout_session(
 
     let user_id_str = &user.id.to_string();
 
-    // Might need more tuning
+    let allow_promo_codes = settings.stripe_allow_promocodes.unwrap_or(false);
+    let mode = settings
+        .stripe_mode
+        .clone()
+        .unwrap_or("subscription".to_string())
+        .to_lowercase();
+
+    let checkout_mode = match mode.as_str() {
+        "payment" => stripe::CheckoutSessionMode::Payment,
+        "setup" => stripe::CheckoutSessionMode::Setup,
+        _ => stripe::CheckoutSessionMode::Subscription,
+    };
+
+    let success_url = format!("{frontend_url}payment/verify?session_id={{CHECKOUT_SESSION_ID}}",);
+    let cancel_url = format!("{frontend_url}/payment/cancel");
+    let return_url = format!("{frontend_url}/dash");
+
     let mut session_params = CreateCheckoutSession {
-        success_url: Some(
-            "https://dash.wayclip.com/payment/verify?session_id={CHECKOUT_SESSION_ID}",
-        ),
-        cancel_url: Some("https://dash.wayclip.com/payment/cancel"),
-        return_url: Some("https://dash.wayclip.com/dash"),
+        success_url: Some(success_url.as_str()),
+        cancel_url: Some(cancel_url.as_str()),
+        return_url: Some(return_url.as_str()),
         client_reference_id: Some(user_id_str),
-        allow_promotion_codes: Some(true),
+        allow_promotion_codes: Some(allow_promo_codes),
         payment_method_types: Some(vec![CreateCheckoutSessionPaymentMethodTypes::Card]),
-        mode: Some(stripe::CheckoutSessionMode::Subscription),
+        mode: Some(checkout_mode),
         line_items: Some(vec![CreateCheckoutSessionLineItems {
             price: Some(price_id),
             quantity: Some(1),
@@ -106,6 +126,10 @@ pub async fn create_customer_portal_session(
     state: web::Data<AppState>,
     user_id: web::ReqData<Uuid>,
 ) -> impl Responder {
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(user_id.into_inner())
         .fetch_one(&state.db_pool)
@@ -141,6 +165,10 @@ pub async fn cancel_subscription(
     state: web::Data<AppState>,
     user_id: web::ReqData<Uuid>,
 ) -> impl Responder {
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
     let subscription = match sqlx::query_as::<_, UserSubscription>(
         "SELECT * FROM subscriptions WHERE user_id = $1 AND status = 'active'",
     )
@@ -189,13 +217,21 @@ pub async fn stripe_webhook(
     state: web::Data<AppState>,
     stripe_client: web::Data<Client>,
 ) -> impl Responder {
+    let settings = state.settings.clone();
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        log!([DEBUG] => "Webhook received but payments are disabled. Ignoring event.");
+        return HttpResponse::Ok().finish();
+    }
     let signature = match req.headers().get("Stripe-Signature") {
         Some(s) => s.to_str().unwrap_or(""),
         None => return HttpResponse::BadRequest().finish(),
     };
 
-    let webhook_secret =
-        std::env::var("STRIPE_WEBHOOK_SECRET").expect("Missing STRIPE_WEBHOOK_SECRET");
+    let webhook_secret = settings
+        .stripe_webhook_secret
+        .clone()
+        .expect("Missing stripe webhook secret");
 
     let event = match Webhook::construct_event(
         std::str::from_utf8(&payload).unwrap(),
@@ -593,6 +629,10 @@ pub async fn verify_checkout_session(
     user_id: web::ReqData<Uuid>,
     query: web::Query<HashMap<String, String>>,
 ) -> impl Responder {
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
     let session_id = match query.get("session_id") {
         Some(id) => id,
         None => return HttpResponse::BadRequest().json("Missing session_id"),

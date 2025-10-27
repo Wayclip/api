@@ -1,69 +1,14 @@
+use crate::models::{
+    AdminDashboardData, FullUserDetails, ReportedClipInfo, UpdateRolePayload, UpdateTierPayload,
+    UserAdminInfo,
+};
 use crate::AppState;
 use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use serde::Serialize;
 use serde_json::json;
 use sqlx::types::chrono::Utc;
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{HostedClipInfo, UserRole};
-
-#[derive(Serialize, sqlx::FromRow)]
-struct UserAdminInfo {
-    id: Uuid,
-    username: String,
-    email: Option<String>,
-    tier: String,
-    is_banned: bool,
-    role: UserRole,
-    clip_count: i64,
-    data_used: i64,
-}
-
-#[derive(Serialize, sqlx::FromRow)]
-struct ReportedClipInfo {
-    clip_id: Uuid,
-    file_name: String,
-    file_size: i64,
-    uploader_username: String,
-    report_token: Uuid,
-}
-
-#[derive(serde::Deserialize)]
-pub struct UpdateRolePayload {
-    role: UserRole,
-}
-
-#[derive(serde::Deserialize)]
-pub struct UpdateTierPayload {
-    tier: String,
-}
-
-#[derive(Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct FullUserDetails {
-    id: Uuid,
-    username: String,
-    email: Option<String>,
-    avatar_url: Option<String>,
-    tier: String,
-    role: UserRole,
-    is_banned: bool,
-    created_at: chrono::DateTime<chrono::Utc>,
-    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
-    two_factor_enabled: bool,
-    subscription_status: Option<String>,
-    current_period_end: Option<chrono::DateTime<chrono::Utc>>,
-    #[sqlx(json)]
-    connected_providers: serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct AdminDashboardData {
-    users: Vec<UserAdminInfo>,
-    reported_clips: Vec<ReportedClipInfo>,
-    total_data_usage: i64,
-}
+use wayclip_core::models::HostedClipInfo;
 
 async fn validate_and_use_token(
     token: Uuid,

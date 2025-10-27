@@ -1,3 +1,4 @@
+use crate::mailer::Mailer;
 use crate::settings::Settings;
 use crate::storage::{LocalStorage, SftpStorage, Storage};
 use actix_cors::Cors;
@@ -8,12 +9,10 @@ use actix_extensible_rate_limit::{
 use actix_web::dev::RequestHead;
 use actix_web::http::header::HeaderValue;
 use actix_web::{web, App, HttpServer};
-use dotenvy::dotenv;
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenUrl};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::env;
 use std::fs as std_fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +28,7 @@ mod db;
 mod jwt;
 mod mailer;
 mod middleware;
+mod models;
 mod settings;
 mod storage;
 mod stripe_handler;
@@ -36,18 +36,18 @@ mod stripe_handler;
 #[derive(Clone)]
 pub struct AppState {
     db_pool: PgPool,
-    github_oauth_client: BasicClient,
-    google_oauth_client: BasicClient,
-    discord_oauth_client: BasicClient,
-    frontend_url: String,
+    github_oauth_client: Option<BasicClient>,
+    google_oauth_client: Option<BasicClient>,
+    discord_oauth_client: Option<BasicClient>,
+    allowed_uris: Vec<String>,
     storage: Arc<dyn Storage>,
-    mailer: mailer::Mailer,
-    payments_enabled: bool,
+    mailer: Option<mailer::Mailer>,
     tiers: Arc<HashMap<String, TierConfig>>,
+    settings: Arc<Settings>,
 }
 
-async fn seed_initial_admins(db_pool: &PgPool) {
-    if let Ok(admin_emails_str) = env::var("INITIAL_ADMIN_EMAILS") {
+async fn seed_initial_admins(db_pool: &PgPool, settings: &Settings) {
+    if let Some(admin_emails_str) = &settings.initial_admin_emails {
         if admin_emails_str.is_empty() {
             return;
         }
@@ -73,14 +73,17 @@ async fn seed_initial_admins(db_pool: &PgPool) {
     }
 }
 
-async fn init_plans(pool: &PgPool) {
+async fn init_plans(pool: &PgPool, settings: &Settings) {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM plans")
         .fetch_one(pool)
         .await
         .unwrap_or(0);
 
     if count == 0 {
-        let json = env::var("TIERS_JSON").unwrap_or_else(|_| "[]".to_string());
+        let json = settings
+            .tiers_json
+            .clone()
+            .unwrap_or_else(|| String::from("[]"));
         let parsed: Vec<TierConfig> = serde_json::from_str(&json).unwrap_or_default();
 
         for t in parsed {
@@ -124,122 +127,174 @@ async fn load_tiers_from_db(pool: &PgPool) -> HashMap<String, TierConfig> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenv().ok();
+    let mut github_oauth_client: Option<BasicClient> = None;
+    let mut google_oauth_client: Option<BasicClient> = None;
+    let mut discord_oauth_client: Option<BasicClient> = None;
+    let mut mailer: Option<Mailer> = None;
+    let mut stripe_client: Option<stripe::Client> = None;
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
     log!([DEBUG] => "Logger initialized. Starting up Wayclip API...");
 
-    let config = Settings::new().expect("Failed to load configuration");
+    let settings = Settings::new().expect("Failed to load configuration");
     log!([DEBUG] => "Configuration loaded successfully.");
 
-    let payments_enabled = config.payments_enabled.unwrap_or(false);
+    let payments_enabled = settings.payments_enabled.unwrap_or(false);
+    let backend_url = settings.backend_url.clone();
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let redirect_uri = env::var("REDIRECT_URL").expect("REDIRECT_URL must be set");
-
-    let pool = db::create_pool(&database_url)
+    let pool = db::create_pool(&settings.database_url)
         .await
         .expect("Failed to create database pool.");
     log!([DEBUG] => "Database pool created successfully.");
 
-    init_plans(&pool).await;
+    init_plans(&pool, &settings).await;
     let tiers = Arc::new(load_tiers_from_db(&pool).await);
     log!([DEBUG] => "Tier limits loaded from database.");
 
-    seed_initial_admins(&pool).await;
+    seed_initial_admins(&pool, &settings).await;
 
-    let github_oauth_client = BasicClient::new(
-        ClientId::new(env::var("GITHUB_CLIENT_ID").expect("Missing GITHUB_CLIENT_ID")),
-        Some(ClientSecret::new(
-            env::var("GITHUB_CLIENT_SECRET").expect("Missing GITHUB_CLIENT_SECRET"),
-        )),
-        AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap(),
-        Some(TokenUrl::new("https://github.com/login/oauth/access_token".to_string()).unwrap()),
-    )
-    .set_redirect_uri(RedirectUrl::new(format!("{redirect_uri}/auth/github/callback")).unwrap());
+    if settings.github_auth_enabled.is_some() {
+        if let (Some(client_id), Some(client_secret)) =
+            (&settings.github_client_id, &settings.github_client_secret)
+        {
+            github_oauth_client = Some(
+                BasicClient::new(
+                    ClientId::new(client_id.clone()),
+                    Some(ClientSecret::new(client_secret.clone())),
+                    AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap(),
+                    Some(
+                        TokenUrl::new("https://github.com/login/oauth/access_token".to_string())
+                            .unwrap(),
+                    ),
+                )
+                .set_redirect_uri(
+                    RedirectUrl::new(format!("{backend_url}/auth/github/callback")).unwrap(),
+                ),
+            );
+        } else {
+            panic!(
+                "GitHub auth is enabled, but GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET is missing."
+            );
+        }
+    }
 
-    let google_oauth_client = BasicClient::new(
-        ClientId::new(env::var("GOOGLE_CLIENT_ID").expect("Missing GOOGLE_CLIENT_ID")),
-        Some(ClientSecret::new(
-            env::var("GOOGLE_CLIENT_SECRET").expect("Missing GOOGLE_CLIENT_SECRET"),
-        )),
-        AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string()).unwrap(),
-        Some(TokenUrl::new("https://www.googleapis.com/oauth2/v4/token".to_string()).unwrap()),
-    )
-    .set_redirect_uri(RedirectUrl::new(format!("{redirect_uri}/auth/google/callback")).unwrap());
+    if settings.google_auth_enabled.is_some() {
+        if let (Some(client_id), Some(client_secret)) =
+            (&settings.google_client_id, &settings.google_client_secret)
+        {
+            google_oauth_client = Some(
+                BasicClient::new(
+                    ClientId::new(client_id.clone()),
+                    Some(ClientSecret::new(client_secret.clone())),
+                    AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
+                        .unwrap(),
+                    Some(
+                        TokenUrl::new("https://www.googleapis.com/oauth2/v4/token".to_string())
+                            .unwrap(),
+                    ),
+                )
+                .set_redirect_uri(
+                    RedirectUrl::new(format!("{backend_url}/auth/google/callback")).unwrap(),
+                ),
+            );
+        } else {
+            panic!(
+                "Google auth is enabled, but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing."
+            );
+        }
+    }
 
-    let discord_oauth_client = BasicClient::new(
-        ClientId::new(env::var("DISCORD_CLIENT_ID").expect("Missing DISCORD_CLIENT_ID")),
-        Some(ClientSecret::new(
-            env::var("DISCORD_CLIENT_SECRET").expect("Missing DISCORD_CLIENT_SECRET"),
-        )),
-        AuthUrl::new("https://discord.com/api/oauth2/authorize".to_string()).unwrap(),
-        Some(TokenUrl::new("https://discord.com/api/oauth2/token".to_string()).unwrap()),
-    )
-    .set_redirect_uri(RedirectUrl::new(format!("{redirect_uri}/auth/discord/callback")).unwrap());
+    if settings.discord_auth_enabled.is_some() {
+        if let (Some(client_id), Some(client_secret)) =
+            (&settings.discord_client_id, &settings.discord_client_secret)
+        {
+            discord_oauth_client = Some(
+                BasicClient::new(
+                    ClientId::new(client_id.clone()),
+                    Some(ClientSecret::new(client_secret.clone())),
+                    AuthUrl::new("https://discord.com/api/oauth2/authorize".to_string()).unwrap(),
+                    Some(
+                        TokenUrl::new("https://discord.com/api/oauth2/token".to_string()).unwrap(),
+                    ),
+                )
+                .set_redirect_uri(
+                    RedirectUrl::new(format!("{backend_url}/auth/discord/callback")).unwrap(),
+                ),
+            );
+        } else {
+            panic!("Discord auth is enabled, but DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET is missing.");
+        }
+    }
 
-    let stripe_client: Option<stripe::Client> = if payments_enabled {
-        let key = env::var("STRIPE_SECRET_KEY").expect("Missing STRIPE_SECRET_KEY");
-        Some(Client::new(key))
-    } else {
-        None
-    };
+    if payments_enabled {
+        if let Some(key) = &settings.stripe_secret_key {
+            stripe_client = Some(Client::new(key.clone()));
+        } else {
+            panic!("Payments are enabled, but STRIPE_SECRET_KEY is missing.");
+        }
+    }
 
-    let redirect_url =
-        RedirectUrl::new(format!("{redirect_uri}/auth/callback").to_string()).unwrap();
+    if settings.email_auth_enabled.is_some() {
+        mailer = Some(Mailer::new(&settings));
+    }
 
-    log!([AUTH] => "OAuth2 configured with Redirect URL: {redirect_url:?}");
+    log!([AUTH] => "OAuth2 configured with Redirect URL: {backend_url}/auth/callback");
 
-    let storage: Arc<dyn Storage> = match config.storage_type.as_str() {
-        "LOCAL" => Arc::new(LocalStorage::new(&config)),
+    let storage: Arc<dyn Storage> = match settings.storage_type.as_str() {
+        "LOCAL" => Arc::new(LocalStorage::new(&settings)),
         "SFTP" => Arc::new(
-            SftpStorage::new(&config).expect("Failed to create SFTP Storage with connection pool"),
+            SftpStorage::new(&settings)
+                .expect("Failed to create SFTP Storage with connection pool"),
         ),
         _ => panic!("Invalid STORAGE_TYPE specified"),
     };
-    log!([DEBUG] => "Storage backend initialized: {}", config.storage_type);
+    log!([DEBUG] => "Storage backend initialized: {}", settings.storage_type);
 
-    if config.storage_type == "LOCAL" {
-        let local_path = config
+    if settings.storage_type == "LOCAL" {
+        let local_path = settings
             .local_storage_path
             .clone()
             .unwrap_or_else(|| "./uploads".to_string());
         std_fs::create_dir_all(&local_path).expect("Could not create local storage directory");
     }
-    let frontend_url = config.public_url.clone();
+    let frontend_url = settings.frontend_url.clone();
+
+    let allowed_uris: Vec<String> = settings
+        .allow_redirect_uris
+        .clone()
+        .unwrap_or_default()
+        .split(",")
+        .map(String::from)
+        .collect();
 
     let app_state = AppState {
         db_pool: pool,
         github_oauth_client,
         google_oauth_client,
         discord_oauth_client,
+        allowed_uris,
         storage,
         tiers,
-        frontend_url: frontend_url.clone(),
-        payments_enabled,
-        mailer: mailer::Mailer::new(),
+        settings: Arc::new(settings.clone()), // Perhaps split into separate app_data's
+        mailer,
     };
 
-    let app_settings = web::Data::new(config.clone());
     let backend = InMemoryBackend::builder().build();
 
     log!([DEBUG] => "Starting Actix web server on 0.0.0.0:8080...");
 
     HttpServer::new(move || {
         let frontend_url_clone = frontend_url.clone();
+        let backend_url_clone = backend_url.clone();
 
         let cors = Cors::default()
             .allowed_origin_fn(move |origin: &HeaderValue, _req_head: &RequestHead| {
-                let allowed_origins = [
-                    "http://localhost:3000",
-                    "https://wayclip.com",
-                    "https://dash.wayclip.com",
-                    &frontend_url_clone,
-                ];
+                let allowed_origins = [&frontend_url_clone, &backend_url_clone];
                 if let Ok(s) = origin.to_str() {
-                    allowed_origins.contains(&s)
+                    allowed_origins.iter().any(|origin_str| *origin_str == s)
                 } else {
                     false
                 }
@@ -262,7 +317,6 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(web::Data::new(app_state.clone()))
-            .app_data(app_settings.clone())
             .app_data(web::Data::new(stripe_client.clone()))
             .wrap(cors)
             .wrap(TracingLogger::default())
