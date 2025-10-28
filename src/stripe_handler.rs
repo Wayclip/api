@@ -2,6 +2,7 @@ use crate::AppState;
 use crate::HashMap;
 use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use stripe::{
     BillingPortalSession, Charge, CheckoutSession, Client, CreateBillingPortalSession,
     CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionPaymentMethodTypes,
@@ -663,4 +664,12 @@ pub async fn verify_checkout_session(
     } else {
         HttpResponse::Ok().json(serde_json::json!({ "status": session.status }))
     }
+}
+
+#[get("/get-payment-info")]
+pub async fn get_payment_info(state: web::Data<AppState>) -> impl Responder {
+    let settings = state.settings.clone();
+    let active_tiers = &state.tiers;
+    HttpResponse::Ok()
+        .json(json!({ "payments_enabled": settings.payments_enabled, "active_tiers": serde_json::to_string_pretty(&*active_tiers).unwrap()}))
 }

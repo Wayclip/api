@@ -74,28 +74,69 @@ async fn seed_initial_admins(db_pool: &PgPool, settings: &Settings) {
 }
 
 async fn init_plans(pool: &PgPool, settings: &Settings) {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM plans")
+    let plan_count: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM plans")
         .fetch_one(pool)
         .await
-        .unwrap_or(0);
+    {
+        Ok(count) => count,
+        Err(e) => {
+            log!([DEBUG] => "Failed to check for existing plans in database: {}", e);
+            return;
+        }
+    };
 
-    if count == 0 {
-        let json = settings
+    if plan_count == 0 {
+        log!([DEBUG] => "No plans found in the database. Initializing from settings...");
+
+        let json_config = settings
             .tiers_json
             .clone()
-            .unwrap_or_else(|| String::from("[]"));
-        let parsed: Vec<TierConfig> = serde_json::from_str(&json).unwrap_or_default();
+            .unwrap_or_else(|| "[]".to_string());
+        if json_config == "[]" {
+            log!([DEBUG] => "TIERS_JSON is empty. No plans will be initialized.");
+            return;
+        }
 
-        for t in parsed {
-            let _ = sqlx::query(
-                "INSERT INTO plans (name, max_storage_bytes, stripe_price_id) VALUES ($1, $2, $3)",
+        let tiers_to_insert: Vec<TierConfig> = match serde_json::from_str(&json_config) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                log!([DEBUG]=>
+                    "Failed to parse TIERS_JSON: {e}. Please check the format.",
+                );
+                return;
+            }
+        };
+
+        for tier in tiers_to_insert {
+            let result = sqlx::query(
+                r#"
+                INSERT INTO plans (
+                    name, max_storage_bytes, stripe_price_id, display_price,
+                    display_frequency, description, display_features, is_popular
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "#,
             )
-            .bind(t.name)
-            .bind(t.max_storage_bytes as i64)
-            .bind(t.stripe_price_id)
+            .bind(&tier.name)
+            .bind(tier.max_storage_bytes as i64)
+            .bind(&tier.stripe_price_id)
+            .bind(&tier.display_price)
+            .bind(&tier.display_frequency)
+            .bind(&tier.description)
+            .bind(&tier.display_features)
+            .bind(&tier.is_popular)
             .execute(pool)
             .await;
+
+            match result {
+                Ok(_) => log!([DEBUG] => "Successfully inserted plan: '{}'", tier.name),
+                Err(e) => log!([DEBUG] => "Failed to insert plan '{}': {}", tier.name, e),
+            }
         }
+    } else {
+        log!([DEBUG] =>
+            "Database already contains {} plans. Skipping initialization.",
+            plan_count
+        );
     }
 }
 
@@ -381,6 +422,9 @@ async fn main() -> std::io::Result<()> {
             .service(clip_handler::serve_clip_raw)
             .service(clip_handler::serve_clip_oembed)
             .service(clip_handler::report_clip)
+            .service(clip_handler::get_app_info)
+            .service(auth_handler::get_auth_info)
+            .service(stripe_handler::get_payment_info)
     })
     .bind(("0.0.0.0", 8080))?
     .run()

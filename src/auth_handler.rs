@@ -1599,3 +1599,14 @@ async fn logout_all_devices(req: HttpRequest, data: web::Data<AppState>) -> impl
         }
     }
 }
+
+#[get("/get-auth-info")]
+pub async fn get_auth_info(state: web::Data<AppState>) -> impl Responder {
+    let settings = state.settings.clone();
+    HttpResponse::Ok().json(json!({
+        "discord_auth_enabled": settings.discord_auth_enabled,
+        "github_auth_enabled": settings.github_auth_enabled,
+        "google_auth_enabled": settings.github_auth_enabled,
+        "email_auth_enabled": settings.email_auth_enabled
+    }))
+}

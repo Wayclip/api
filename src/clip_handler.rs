@@ -5,6 +5,7 @@ use actix_web::{delete, get, post, web, Error, HttpMessage, HttpRequest, HttpRes
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
 use http_range::HttpRange;
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -589,4 +590,16 @@ pub async fn serve_clip_oembed(
     });
 
     HttpResponse::Ok().json(oembed_response)
+}
+
+#[get("/get-app-info")]
+pub async fn get_app_info(state: web::Data<AppState>) -> impl Responder {
+    let settings = state.settings.clone();
+    HttpResponse::Ok().json(json!({
+        "backend_url": settings.backend_url,
+        "frontend_url": settings.frontend_url,
+        "app_name": settings.app_name,
+        "default_avatar_url": settings.default_avatar_url,
+        "upload_limit_bytes": settings.upload_limit_bytes
+    }))
 }
