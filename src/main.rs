@@ -141,29 +141,13 @@ async fn init_plans(pool: &PgPool, settings: &Settings) {
 }
 
 async fn load_tiers_from_db(pool: &PgPool) -> HashMap<String, TierConfig> {
-    struct TierConfigDb {
-        name: String,
-        max_storage_bytes: i64,
-        stripe_price_id: Option<String>,
-    }
-
-    sqlx::query_as!(
-        TierConfigDb,
-        "SELECT name, max_storage_bytes, stripe_price_id FROM plans"
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|db_tier| {
-        let tier_config = TierConfig {
-            name: db_tier.name.clone(),
-            max_storage_bytes: db_tier.max_storage_bytes as u64,
-            stripe_price_id: db_tier.stripe_price_id,
-        };
-        (db_tier.name, tier_config)
-    })
-    .collect()
+    sqlx::query_as::<_, TierConfig>("SELECT * FROM plans")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tier| (tier.name.clone(), tier))
+        .collect()
 }
 
 #[actix_web::main]

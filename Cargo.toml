@@ -47,7 +47,7 @@ actix-multipart = "0.7.2"
 actix-files = "0.6.6"
 actix-ratelimit = "0.3.1"
 actix-extensible-rate-limit = "0.4.0"
-wayclip_core = { path = "../core/" }
+wayclip_core = { git = "https://github.com/Wayclip/core.git", branch = "selfhosting" }
 russh = { version = "0.54.3", features = ["async-trait"] }
 russh-sftp = "2.1.1"
 ssh-key = "0.6.7"
