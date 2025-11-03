@@ -317,9 +317,12 @@ async fn main() -> std::io::Result<()> {
 
         let cors = Cors::default()
             .allowed_origin_fn(move |origin: &HeaderValue, _req_head: &RequestHead| {
-                let allowed_origins = [&frontend_url_clone, &backend_url_clone];
                 if let Ok(s) = origin.to_str() {
-                    allowed_origins.iter().any(|origin_str| *origin_str == s)
+                    let allowed_origins = [
+                        frontend_url_clone.trim_end_matches('/'),
+                        backend_url_clone.trim_end_matches('/'),
+                    ];
+                    allowed_origins.contains(&s)
                 } else {
                     false
                 }
