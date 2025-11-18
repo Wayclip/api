@@ -129,11 +129,11 @@ impl Mailer {
         Ok(())
     }
 
-    pub fn send_unrecognized_device_email(
+    pub fn send_new_login_email(
         &self,
         to: &str,
         username: &str,
-        ip_address: &str,
+        user_agent: &str,
     ) -> Result<(), lettre::transport::smtp::Error> {
         let config = self.config.clone();
         let app_name = config.app_name;
@@ -142,9 +142,9 @@ impl Mailer {
 
         let subject = format!("Security Alert: New Sign-in to Your {app_name} Account");
         let body_text = &format!(
-            "We noticed a new sign-in to your account from an unrecognized device (IP: {}). If this was you, you can safely ignore this email. If you don't recognize this activity, please secure your account immediately.",
-            ip_address
-        );
+        "We noticed a new sign-in to your account from a new device ({}). If this was you, you can safely ignore this email. If you don't recognize this activity, please secure your account immediately by reviewing your active sessions and changing your password.",
+        user_agent
+    );
         let button_text = "Review Account Security";
 
         let html_body = self.read_and_populate_template(

@@ -29,6 +29,7 @@ mod jwt;
 mod mailer;
 mod middleware;
 mod models;
+mod session;
 mod settings;
 mod storage;
 mod stripe_handler;
@@ -376,6 +377,8 @@ async fn main() -> std::io::Result<()> {
                     .service(auth_handler::unlink_oauth_provider)
                     .service(auth_handler::two_factor_setup)
                     .service(auth_handler::two_factor_verify)
+                    .service(auth_handler::get_sessions)
+                    .service(auth_handler::revoke_session)
                     .service(stripe_handler::create_checkout_session)
                     .service(stripe_handler::create_customer_portal_session)
                     .service(stripe_handler::verify_checkout_session)

@@ -1,3 +1,5 @@
+use crate::log;
+use crate::session;
 use crate::settings::Settings;
 use crate::{jwt, mailer::Mailer, AppState};
 use actix_web::cookie::time::Duration;
@@ -16,14 +18,14 @@ use image::Luma;
 use oauth2::reqwest::async_http_client;
 use oauth2::{AuthorizationCode, CsrfToken, Scope, TokenResponse};
 use qrcode::QrCode;
-use rand::prelude::*;
-use rand::random;
+use rand::distr::Alphanumeric;
+use rand::seq::IteratorRandom;
+use rand::{random, Rng};
 use serde_json::json;
 use sqlx::PgPool;
 use totp_rs::{Algorithm, Secret, TOTP};
 use url::Url;
 use uuid::Uuid;
-use wayclip_core::log;
 use wayclip_core::models::{
     CredentialProvider, DiscordUser, GitHubUser, GoogleUser, User, UserProfile,
 };
@@ -132,94 +134,70 @@ fn build_auth_cookie(
     cookie_builder.finish()
 }
 
-async fn is_device_recognized(
-    db: &PgPool,
-    user_id: Uuid,
-    ip_address: &str,
-) -> Result<bool, sqlx::Error> {
-    let thirty_days_ago = chrono::Utc::now() - chrono::Duration::days(30);
-    let recent_login = sqlx::query!(
-        "SELECT EXISTS (
-            SELECT 1 FROM user_login_history
-            WHERE user_id = $1 AND ip_address = $2 AND created_at > $3
-        )",
-        user_id,
-        ip_address,
-        thirty_days_ago
-    )
-    .fetch_one(db)
-    .await?;
-
-    Ok(recent_login.exists.unwrap_or(false))
-}
-
 async fn record_successful_login(
     db: &PgPool,
     user: &User,
     req: &HttpRequest,
     mailer: Option<&Mailer>,
-) -> bool {
-    let ip = req
-        .connection_info()
-        .realip_remote_addr()
-        .unwrap_or("unknown")
-        .to_string();
+) -> String {
+    let user_agent = session::get_user_agent(req);
+    let existing_sessions_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM user_sessions WHERE user_id = $1",
+        user.id
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
 
-    let mut was_unrecognized = false;
+    if existing_sessions_count > 0 {
+        if let Some(mailer) = mailer {
+            if let Some(email) = &user.email {
+                let email_clone = email.clone();
+                let username_clone = user.username.clone();
+                let parsed_ua = session::parse_user_agent(&user_agent);
+                let mailer_clone = mailer.clone();
 
-    if user.two_factor_enabled {
-        match is_device_recognized(db, user.id, &ip).await {
-            Ok(true) => {}
-            Ok(false) => {
-                was_unrecognized = true;
-                if let Some(mailer) = mailer {
-                    if let Some(email) = &user.email {
-                        let email_clone = email.clone();
-                        let username_clone = user.username.clone();
-                        let ip_clone = ip.clone();
-
-                        let mailer_clone = mailer.clone();
-                        actix_web::rt::spawn(async move {
-                            if let Err(e) = mailer_clone.send_unrecognized_device_email(
-                                &email_clone,
-                                &username_clone,
-                                &ip_clone,
-                            ) {
-                                log!([DEBUG] => "Failed to send unrecognized device email: {:?}", e);
-                            }
-                        });
+                actix_web::rt::spawn(async move {
+                    if let Err(e) =
+                        mailer_clone.send_new_login_email(&email_clone, &username_clone, &parsed_ua)
+                    {
+                        log!([DEBUG] => "Failed to send new login email: {:?}", e);
                     }
-                }
-            }
-            Err(e) => {
-                log!([DEBUG] => "Failed to check device recognition for user {}: {:?}", user.id, e);
+                });
             }
         }
     }
 
+    let session_token: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+
     if let Err(e) = sqlx::query!(
-        "UPDATE users SET last_login_at = NOW(), last_login_ip = $1 WHERE id = $2",
-        &ip,
+        "INSERT INTO user_sessions (user_id, session_token, user_agent, last_seen_at) VALUES ($1, $2, $3, NOW())",
+        user.id,
+        &session_token,
+        &user_agent
+    )
+    .execute(db)
+    .await
+    {
+        log!([DEBUG] => "Failed to record new session for user {}: {:?}", user.id, e);
+    }
+
+    if let Err(e) = sqlx::query!(
+        "UPDATE users SET last_login_at = NOW() WHERE id = $1",
         user.id
     )
     .execute(db)
     .await
     {
-        log!([DEBUG] => "Failed to update last_login info for user {}: {:?}", user.id, e);
+        log!([DEBUG] => "Failed to update last_login_at for user {}: {:?}", user.id, e);
     }
 
-    if let Err(e) = sqlx::query!(
-        "INSERT INTO user_login_history (user_id, ip_address) VALUES ($1, $2)",
-        user.id,
-        &ip
-    )
-    .execute(db)
-    .await
-    {
-        log!([DEBUG] => "Failed to record login history for user {}: {:?}", user.id, e);
-    }
-
-    was_unrecognized
+    session_token
 }
 
 async fn upsert_oauth_user(
@@ -286,17 +264,8 @@ async fn finalize_login(
     req: &HttpRequest,
 ) -> HttpResponse {
     let settings = data.settings.clone();
-    let ip = req
-        .connection_info()
-        .realip_remote_addr()
-        .unwrap_or("unknown")
-        .to_string();
 
-    let device_recognized = is_device_recognized(&data.db_pool, user.id, &ip)
-        .await
-        .unwrap_or(true);
-
-    if user.two_factor_enabled && !device_recognized {
+    if user.two_factor_enabled {
         let temp_jwt = match jwt::create_jwt(user.id, &user.security_stamp, true) {
             Ok(token) => token,
             Err(e) => {
@@ -320,24 +289,16 @@ async fn finalize_login(
         }
     }
 
-    record_successful_login(&data.db_pool, &user, req, data.mailer.as_ref()).await;
-
-    let final_jwt = match jwt::create_jwt(user.id, &user.security_stamp, false) {
-        Ok(token) => token,
-        Err(e) => {
-            log!([AUTH] => "ERROR: Failed to create final JWT: {:?}", e);
-            return HttpResponse::InternalServerError()
-                .json(json!({ "message": "Failed to create session token" }));
-        }
-    };
+    let session_token =
+        record_successful_login(&data.db_pool, &user, req, data.mailer.as_ref()).await;
 
     if client_type == "cli" {
-        let deep_link = format!("{final_redirect_str}?token={final_jwt}");
+        let deep_link = format!("{final_redirect_str}?token={session_token}");
         HttpResponse::Found()
             .append_header((LOCATION, deep_link))
             .finish()
     } else {
-        let auth_cookie = build_auth_cookie("token", &final_jwt, None);
+        let auth_cookie = build_auth_cookie("session_token", &session_token, None);
         HttpResponse::Ok()
             .cookie(auth_cookie)
             .json(serde_json::json!({ "success": true }))
@@ -819,8 +780,9 @@ async fn register_with_password(
     {
         Ok(user) => user,
         Err(_) => {
+            tx.rollback().await.ok();
             return HttpResponse::Conflict()
-                .json(json!({ "message": "User with this email already exists." }))
+                .json(json!({ "message": "User with this email or username already exists." }));
         }
     };
 
@@ -858,8 +820,7 @@ async fn register_with_password(
             log!([DEBUG] => "Failed to send verification email: {:?}", e);
         }
     } else {
-        HttpResponse::InternalServerError()
-            .json(json!({ "message": "Could not send verficiation email"}));
+        log!([DEBUG] => "Mailer not configured, cannot send verification email.");
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "message": "Registration successful. Please check your email to verify your account." }))
@@ -991,8 +952,7 @@ async fn resend_verification_email(
             .send_verification_email(user.email.as_ref().unwrap(), &user.username, &token)
             .ok();
     } else {
-        HttpResponse::InternalServerError()
-            .json(json!({ "message": "Could not send verficiation email"}));
+        log!([DEBUG] => "Mailer not configured, cannot resend verification email.");
     }
 
     HttpResponse::Ok().json(success_message)
@@ -1119,7 +1079,7 @@ async fn forgot_password(
             log!([DEBUG] => "Failed to send password reset email: {:?}", e);
         }
     } else {
-        HttpResponse::InternalServerError().json(json!({ "message": "Failed to send email" }));
+        log!([DEBUG] => "Mailer not configured, cannot send password reset email.");
     }
 
     HttpResponse::Ok().json(success_message)
@@ -1352,9 +1312,7 @@ async fn two_factor_authenticate(
             .json(json!({ "message": "Invalid or expired 2FA token." }));
     }
 
-    let user_clone = user.clone();
-
-    let secret = match user_clone.two_factor_secret {
+    let secret = match user.two_factor_secret.as_ref() {
         Some(s) => s,
         None => {
             return HttpResponse::BadRequest()
@@ -1367,7 +1325,7 @@ async fn two_factor_authenticate(
         6,
         1,
         30,
-        Secret::Encoded(secret).to_bytes().unwrap(),
+        Secret::Encoded(secret.clone()).to_bytes().unwrap(),
         None,
         "".to_string(),
     )
@@ -1409,15 +1367,15 @@ async fn two_factor_authenticate(
     }
 
     if code_is_valid {
-        record_successful_login(&data.db_pool, &user, &req, data.mailer.as_ref()).await;
+        let session_token =
+            record_successful_login(&data.db_pool, &user, &req, data.mailer.as_ref()).await;
 
-        let jwt = jwt::create_jwt(user.id, &user.security_stamp, false).unwrap();
         let message = if used_recovery_code {
             "2FA validation successful with recovery code."
         } else {
             "2FA validation successful"
         };
-        let auth_cookie = build_auth_cookie("token", &jwt, None);
+        let auth_cookie = build_auth_cookie("session_token", &session_token, None);
         return HttpResponse::Ok()
             .cookie(auth_cookie)
             .json(serde_json::json!({ "success": true, "message": message }));
@@ -1561,9 +1519,20 @@ async fn delete_account(req: HttpRequest, data: web::Data<AppState>) -> impl Res
 }
 
 #[post("/logout")]
-async fn logout() -> impl Responder {
+async fn logout(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    if let Some(cookie) = req.cookie("session_token") {
+        let session_token = cookie.value();
+        sqlx::query!(
+            "DELETE FROM user_sessions WHERE session_token = $1",
+            session_token
+        )
+        .execute(&data.db_pool)
+        .await
+        .ok();
+    }
+
     let expiry = actix_web::cookie::time::OffsetDateTime::now_utc() - Duration::days(1);
-    let cookie = build_auth_cookie("token", "", Some(expiry));
+    let cookie = build_auth_cookie("session_token", "", Some(expiry));
     HttpResponse::Ok()
         .cookie(cookie)
         .json(serde_json::json!({ "message": "Logged out successfully." }))
@@ -1576,26 +1545,97 @@ async fn logout_all_devices(req: HttpRequest, data: web::Data<AppState>) -> impl
         None => return HttpResponse::Unauthorized().finish(),
     };
 
-    let new_stamp = Uuid::new_v4();
+    let current_session_token = match req.cookie("session_token") {
+        Some(cookie) => cookie.value().to_string(),
+        None => {
+            return HttpResponse::BadRequest()
+                .json(json!({"message": "Current session not found."}));
+        }
+    };
 
-    match sqlx::query("UPDATE users SET security_stamp = $1 WHERE id = $2")
-        .bind(new_stamp)
-        .bind(user_id)
-        .execute(&data.db_pool)
-        .await
+    match sqlx::query!(
+        "DELETE FROM user_sessions WHERE user_id = $1 AND session_token != $2",
+        user_id,
+        current_session_token
+    )
+    .execute(&data.db_pool)
+    .await
     {
         Ok(_) => {
             log!([DEBUG] => "User {} logged out all other devices.", user_id);
-            let new_jwt = jwt::create_jwt(user_id, &new_stamp, false).unwrap();
-            let auth_cookie = build_auth_cookie("token", &new_jwt, None);
             HttpResponse::Ok()
-                .cookie(auth_cookie)
                 .json(serde_json::json!({ "message": "All other sessions have been logged out." }))
         }
         Err(e) => {
             log!([DEBUG] => "Failed to logout devices for user {}: {:?}", user_id, e);
             HttpResponse::InternalServerError()
                 .json(json!({ "message": "Failed to log out other devices." }))
+        }
+    }
+}
+
+#[get("/sessions")]
+pub async fn get_sessions(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    let user_id = match req.extensions().get::<Uuid>() {
+        Some(id) => *id,
+        None => return HttpResponse::Unauthorized().finish(),
+    };
+
+    match session::get_user_sessions(&data.db_pool, user_id).await {
+        Ok(sessions) => {
+            let session_data: Vec<_> = sessions
+                .into_iter()
+                .map(|s| {
+                    json!({
+                        "id": s.id,
+                        "device": session::parse_user_agent(s.user_agent.as_deref().unwrap_or("Unknown")),
+                        "last_seen_at": s.last_seen_at,
+                        "created_at": s.created_at,
+                        "is_current": req.cookie("session_token").map_or(false, |c| c.value() == s.session_token)
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(session_data)
+        }
+        Err(e) => {
+            log!([DEBUG] => "Failed to fetch sessions for user {}: {:?}", user_id, e);
+            HttpResponse::InternalServerError()
+                .json(json!({"message": "Could not retrieve sessions."}))
+        }
+    }
+}
+
+#[delete("/sessions/{session_id}")]
+pub async fn revoke_session(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let user_id = match req.extensions().get::<Uuid>() {
+        Some(id) => *id,
+        None => return HttpResponse::Unauthorized().finish(),
+    };
+    let session_id_to_revoke = path.into_inner();
+
+    match sqlx::query!(
+        "DELETE FROM user_sessions WHERE id = $1 AND user_id = $2",
+        session_id_to_revoke,
+        user_id
+    )
+    .execute(&data.db_pool)
+    .await
+    {
+        Ok(result) => {
+            if result.rows_affected() > 0 {
+                HttpResponse::Ok().json(json!({"message": "Session has been revoked."}))
+            } else {
+                HttpResponse::NotFound().json(json!({"message": "Session not found or you do not have permission to revoke it."}))
+            }
+        }
+        Err(e) => {
+            log!([DEBUG] => "Failed to revoke session {} for user {}: {:?}", session_id_to_revoke, user_id, e);
+            HttpResponse::InternalServerError()
+                .json(json!({"message": "Failed to revoke session."}))
         }
     }
 }
