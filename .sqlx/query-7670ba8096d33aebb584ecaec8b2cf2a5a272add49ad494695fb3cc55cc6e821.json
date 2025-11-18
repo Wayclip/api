@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            u.id,\n            u.username,\n            u.email,\n            u.avatar_url,\n            u.tier as \"tier: _\",\n            u.role as \"role: _\",\n            u.is_banned,\n            u.created_at,\n            u.deleted_at,\n            u.email_verified_at,\n            u.two_factor_enabled,\n            s.status::TEXT as \"subscription_status?\",\n            s.current_period_end as \"current_period_end?\",\n            (\n                SELECT COALESCE(json_agg(provider), '[]'::json)\n                FROM user_credentials\n                WHERE user_id = u.id\n            ) as \"connected_providers!\"\n        FROM\n            users u\n        LEFT JOIN\n            subscriptions s ON u.id = s.user_id\n        WHERE\n            u.id = $1\n        ",
+  "query": "\n        SELECT\n            u.id,\n            u.username,\n            u.email,\n            u.avatar_url,\n            u.tier,\n            u.role as \"role: _\",\n            u.is_banned,\n            u.created_at,\n            u.deleted_at,\n            u.email_verified_at,\n            u.two_factor_enabled,\n            s.status::TEXT as \"subscription_status?\",\n            s.current_period_end as \"current_period_end?\",\n            (\n                SELECT COALESCE(json_agg(provider), '[]'::json)\n                FROM user_credentials\n                WHERE user_id = u.id\n            ) as \"connected_providers!\"\n        FROM\n            users u\n        LEFT JOIN\n            subscriptions s ON u.id = s.user_id\n        WHERE\n            u.id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -25,20 +25,8 @@
       },
       {
         "ordinal": 4,
-        "name": "tier: _",
-        "type_info": {
-          "Custom": {
-            "name": "subscription_tier",
-            "kind": {
-              "Enum": [
-                "free",
-                "tier1",
-                "tier2",
-                "tier3"
-              ]
-            }
-          }
-        }
+        "name": "tier",
+        "type_info": "Text"
       },
       {
         "ordinal": 5,
@@ -118,5 +106,5 @@
       null
     ]
   },
-  "hash": "d9ab6551f52a0b2acd50e3135cf68362923f7337d4764b4ce52e4ba757c832bf"
+  "hash": "7670ba8096d33aebb584ecaec8b2cf2a5a272add49ad494695fb3cc55cc6e821"
 }

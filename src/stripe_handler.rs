@@ -2,6 +2,7 @@ use crate::AppState;
 use crate::HashMap;
 use actix_web::{delete, get, post, web, HttpRequest, HttpResponse, Responder};
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use stripe::{
     BillingPortalSession, Charge, CheckoutSession, Client, CreateBillingPortalSession,
     CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionPaymentMethodTypes,
@@ -10,22 +11,16 @@ use stripe::{
 };
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{Subscription, SubscriptionStatus, SubscriptionTier, User};
+use wayclip_core::models::{SubscriptionStatus, User, UserSubscription};
 
-fn tier_from_price_id(price_id: &str) -> Option<SubscriptionTier> {
-    let basic_id = std::env::var("STRIPE_PRICE_ID_BASIC").ok()?;
-    let plus_id = std::env::var("STRIPE_PRICE_ID_PLUS").ok()?;
-    let pro_id = std::env::var("STRIPE_PRICE_ID_PRO").ok()?;
-
-    match price_id {
-        p if p == basic_id => Some(SubscriptionTier::Tier1),
-        p if p == plus_id => Some(SubscriptionTier::Tier2),
-        p if p == pro_id => Some(SubscriptionTier::Tier3),
-        _ => {
-            log!([DEBUG] => "ERROR: Unrecognized Stripe Price ID: {}", price_id);
-            None
-        }
-    }
+fn tier_from_price_id(
+    price_id: &str,
+    tiers: &HashMap<String, wayclip_core::models::TierConfig>,
+) -> Option<String> {
+    tiers
+        .values()
+        .find(|t| t.stripe_price_id.as_deref() == Some(price_id))
+        .map(|t| t.name.clone())
 }
 
 #[post("/checkout/{tier}")]
@@ -35,23 +30,31 @@ pub async fn create_checkout_session(
     user_id: web::ReqData<Uuid>,
     tier: web::Path<String>,
 ) -> impl Responder {
+    let settings = state.settings.clone();
+    let active_tiers = &state.tiers;
+    let frontend_url = &state.settings.frontend_url;
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
+
     let tier_str = tier.into_inner();
     let user_id_val = user_id.into_inner();
 
-    let price_id = match tier_str.as_str() {
-        "basic" => std::env::var("STRIPE_PRICE_ID_BASIC").ok(),
-        "plus" => std::env::var("STRIPE_PRICE_ID_PLUS").ok(),
-        "pro" => std::env::var("STRIPE_PRICE_ID_PRO").ok(),
-        _ => None,
-    };
-
-    let price_id = match price_id {
-        Some(id) => id,
+    let price_id = match active_tiers.get(&tier_str) {
+        Some(t) => t.stripe_price_id.clone(),
         None => {
             log!([DEBUG] => "ERROR: Invalid subscription tier provided: {}", tier_str);
             return HttpResponse::BadRequest().json("Invalid subscription tier");
         }
     };
+
+    if price_id.is_none() {
+        log!([DEBUG] => "ERROR: Tier '{}' does not have a Stripe price ID", tier_str);
+        return HttpResponse::BadRequest().json("Invalid subscription tier");
+    }
+
+    let price_id = price_id.unwrap();
 
     log!([DEBUG] => "Creating checkout session for user {} with tier '{}'", user_id_val, tier_str);
 
@@ -66,14 +69,31 @@ pub async fn create_checkout_session(
 
     let user_id_str = &user.id.to_string();
 
+    let allow_promo_codes = settings.stripe_allow_promocodes.unwrap_or(false);
+    let mode = settings
+        .stripe_mode
+        .clone()
+        .unwrap_or("subscription".to_string())
+        .to_lowercase();
+
+    let checkout_mode = match mode.as_str() {
+        "payment" => stripe::CheckoutSessionMode::Payment,
+        "setup" => stripe::CheckoutSessionMode::Setup,
+        _ => stripe::CheckoutSessionMode::Subscription,
+    };
+
+    let success_url = format!("{frontend_url}payment/verify?session_id={{CHECKOUT_SESSION_ID}}",);
+    let cancel_url = format!("{frontend_url}/payment/cancel");
+    let return_url = format!("{frontend_url}/dash");
+
     let mut session_params = CreateCheckoutSession {
-        success_url: Some(
-            "https://dash.wayclip.com/payment/verify?session_id={CHECKOUT_SESSION_ID}",
-        ),
-        cancel_url: Some("https://dash.wayclip.com/payment/cancel"),
+        success_url: Some(success_url.as_str()),
+        cancel_url: Some(cancel_url.as_str()),
+        return_url: Some(return_url.as_str()),
         client_reference_id: Some(user_id_str),
+        allow_promotion_codes: Some(allow_promo_codes),
         payment_method_types: Some(vec![CreateCheckoutSessionPaymentMethodTypes::Card]),
-        mode: Some(stripe::CheckoutSessionMode::Subscription),
+        mode: Some(checkout_mode),
         line_items: Some(vec![CreateCheckoutSessionLineItems {
             price: Some(price_id),
             quantity: Some(1),
@@ -107,6 +127,10 @@ pub async fn create_customer_portal_session(
     state: web::Data<AppState>,
     user_id: web::ReqData<Uuid>,
 ) -> impl Responder {
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(user_id.into_inner())
         .fetch_one(&state.db_pool)
@@ -142,7 +166,11 @@ pub async fn cancel_subscription(
     state: web::Data<AppState>,
     user_id: web::ReqData<Uuid>,
 ) -> impl Responder {
-    let subscription = match sqlx::query_as::<_, Subscription>(
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
+    let subscription = match sqlx::query_as::<_, UserSubscription>(
         "SELECT * FROM subscriptions WHERE user_id = $1 AND status = 'active'",
     )
     .bind(user_id.into_inner())
@@ -190,13 +218,21 @@ pub async fn stripe_webhook(
     state: web::Data<AppState>,
     stripe_client: web::Data<Client>,
 ) -> impl Responder {
+    let settings = state.settings.clone();
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        log!([DEBUG] => "Webhook received but payments are disabled. Ignoring event.");
+        return HttpResponse::Ok().finish();
+    }
     let signature = match req.headers().get("Stripe-Signature") {
         Some(s) => s.to_str().unwrap_or(""),
         None => return HttpResponse::BadRequest().finish(),
     };
 
-    let webhook_secret =
-        std::env::var("STRIPE_WEBHOOK_SECRET").expect("Missing STRIPE_WEBHOOK_SECRET");
+    let webhook_secret = settings
+        .stripe_webhook_secret
+        .clone()
+        .expect("Missing stripe webhook secret");
 
     let event = match Webhook::construct_event(
         std::str::from_utf8(&payload).unwrap(),
@@ -298,7 +334,7 @@ async fn handle_checkout_session_completed(
         }
     };
 
-    let tier = match tier_from_price_id(&price_id) {
+    let tier_name = match tier_from_price_id(&price_id, &state.tiers) {
         Some(t) => t,
         None => {
             log!([DEBUG] => "ERROR: Could not map price ID {} to a tier for sub {}", price_id, stripe_sub_id);
@@ -315,7 +351,7 @@ async fn handle_checkout_session_completed(
     };
 
     if let Err(e) = sqlx::query("UPDATE users SET tier = $1, stripe_customer_id = $2 WHERE id = $3")
-        .bind(tier as SubscriptionTier)
+        .bind(&tier_name)
         .bind(&stripe_customer_id)
         .bind(user_id)
         .execute(&mut *tx)
@@ -400,7 +436,13 @@ async fn handle_subscription_updated(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    let tier = tier_from_price_id(&price_id).unwrap_or(SubscriptionTier::Free);
+    let tier_name = tier_from_price_id(&price_id, &state.tiers).unwrap_or("Free".to_string());
+
+    let final_tier_name = if status == SubscriptionStatus::Active {
+        tier_name
+    } else {
+        "Free".to_string()
+    };
 
     let (start_date, end_date) = (
         DateTime::from_timestamp(sub.current_period_start, 0),
@@ -442,15 +484,9 @@ async fn handle_subscription_updated(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    let final_tier = if status == SubscriptionStatus::Active {
-        tier
-    } else {
-        SubscriptionTier::Free
-    };
-
     if let Err(e) = sqlx::query!(
         "UPDATE users SET tier = $1 WHERE id = $2",
-        final_tier as SubscriptionTier,
+        final_tier_name,
         user_id
     )
     .execute(&state.db_pool)
@@ -491,7 +527,7 @@ async fn handle_subscription_deleted(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'free' WHERE id = $1", user_id)
+    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'Free' WHERE id = $1", user_id)
         .execute(&state.db_pool)
         .await
     {
@@ -553,7 +589,7 @@ async fn handle_charge_dispute_created(
         }
     };
 
-    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'free' WHERE id = $1", user_id)
+    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'Free' WHERE id = $1", user_id)
         .execute(&state.db_pool)
         .await
     {
@@ -594,6 +630,10 @@ pub async fn verify_checkout_session(
     user_id: web::ReqData<Uuid>,
     query: web::Query<HashMap<String, String>>,
 ) -> impl Responder {
+    let payments_enabled = &state.settings.payments_enabled;
+    if !payments_enabled.is_some() {
+        return HttpResponse::Forbidden().json("Payments are currently disabled");
+    }
     let session_id = match query.get("session_id") {
         Some(id) => id,
         None => return HttpResponse::BadRequest().json("Missing session_id"),
@@ -624,4 +664,12 @@ pub async fn verify_checkout_session(
     } else {
         HttpResponse::Ok().json(serde_json::json!({ "status": session.status }))
     }
+}
+
+#[get("/get-payment-info")]
+pub async fn get_payment_info(state: web::Data<AppState>) -> impl Responder {
+    let settings = state.settings.clone();
+    let active_tiers = &state.tiers;
+    HttpResponse::Ok()
+        .json(json!({ "payments_enabled": settings.payments_enabled, "active_tiers": serde_json::to_string_pretty(&*active_tiers).unwrap()}))
 }

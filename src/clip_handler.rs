@@ -5,13 +5,12 @@ use actix_web::{delete, get, post, web, Error, HttpMessage, HttpRequest, HttpRes
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::StreamExt;
 use http_range::HttpRange;
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use wayclip_core::log;
 use wayclip_core::models::{Clip, HostedClipInfo, User};
-
-const MAX_FILE_SIZE: i64 = 1_073_741_824;
 
 #[derive(serde::Deserialize)]
 pub struct ShareBeginRequest {
@@ -24,9 +23,11 @@ pub async fn share_clip_begin(
     req: HttpRequest,
     body: web::Json<ShareBeginRequest>,
     data: web::Data<AppState>,
-    settings: web::Data<Settings>,
 ) -> Result<HttpResponse, Error> {
+    let settings = data.settings.clone();
     log!([DEBUG] => "Received clip share/begin request.");
+    let max_file_size = settings.upload_limit_bytes.unwrap_or(1024 * 1024 * 1024) as i64; // 1GiB
+
     let user_id = req
         .extensions()
         .get::<Uuid>()
@@ -50,7 +51,11 @@ pub async fn share_clip_begin(
         return Err(actix_web::error::ErrorBadRequest("Invalid file name."));
     }
 
-    let tier_limit = data.tier_limits.get(&user.tier).cloned().unwrap_or(0);
+    let tier_limit = data
+        .tiers
+        .get(&user.tier)
+        .map(|t| t.max_storage_bytes as i64)
+        .unwrap_or(0);
     let current_usage: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
     )
@@ -59,9 +64,9 @@ pub async fn share_clip_begin(
     .await
     .unwrap_or(0);
 
-    if body.file_size > MAX_FILE_SIZE {
+    if body.file_size > max_file_size {
         return Err(actix_web::error::ErrorPayloadTooLarge(format!(
-            "File size cannot exceed {MAX_FILE_SIZE} bytes",
+            "File size cannot exceed {max_file_size} bytes",
         )));
     }
     if current_usage + body.file_size > tier_limit {
@@ -84,7 +89,7 @@ pub async fn share_clip_begin(
         actix_web::error::ErrorInternalServerError("Failed to initiate clip upload.")
     })?;
 
-    let response_url = format!("{}/clip/{}", settings.public_url, new_clip.id);
+    let response_url = format!("{}/clip/{}", settings.backend_url, new_clip.id);
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "upload_id": new_clip.id,
         "url": response_url
@@ -217,13 +222,15 @@ pub async fn serve_clip(
     let escaped_file_name = html_escape::encode_text(&display_name);
     let escaped_username = html_escape::encode_text(&clip_details.username);
 
-    let clip_url = format!("{}/clip/{}", settings.public_url, clip_details.id);
-    let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
+    let clip_url = format!("{}/clip/{}", settings.backend_url, clip_details.id);
+    let raw_url = format!("{}/clip/{}/raw", settings.backend_url, clip_details.id);
     let report_url = format!("/clip/{}/report", clip_details.id);
-    let uploader_avatar = clip_details
-        .avatar_url
-        .clone()
-        .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string());
+    let uploader_avatar = clip_details.avatar_url.clone().unwrap_or_else(|| {
+        settings
+            .default_avatar_url
+            .clone()
+            .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string())
+    });
     let formatted_date = clip_details.created_at.format("%B %e, %Y").to_string();
     let iso_date = clip_details.created_at.to_rfc3339();
 
@@ -347,86 +354,90 @@ pub async fn report_clip(
     .await;
 
     if let Ok(report) = report_data {
-        if let Some(url) = &settings.discord_webhook_url {
-            let new_token = Uuid::new_v4();
-            let expiration_time = Utc::now() + Duration::hours(24);
+        let new_token = Uuid::new_v4();
+        let expiration_time = Utc::now() + Duration::hours(24);
 
-            let db_result = sqlx::query!(
-                "INSERT INTO report_tokens (token, clip_id, user_id, expires_at) VALUES ($1, $2, $3, $4)",
-                new_token,
-                report.clip_id,
-                report.user_id,
-                expiration_time
-            )
-            .execute(&data.db_pool)
-            .await;
+        let db_result = sqlx::query!(
+        "INSERT INTO report_tokens (token, clip_id, user_id, expires_at) VALUES ($1, $2, $3, $4)",
+        new_token,
+        report.clip_id,
+        report.user_id,
+        expiration_time
+    )
+        .execute(&data.db_pool)
+        .await;
 
-            if let Err(e) = db_result {
-                log!([DEBUG] => "ERROR: Failed to create report token: {}", e);
-                return HttpResponse::InternalServerError().finish();
-            }
+        if let Err(e) = db_result {
+            log!([DEBUG] => "ERROR: Failed to create report token: {}", e);
+            return HttpResponse::InternalServerError().finish();
+        }
 
-            let display_name = sanitize_display_name(&report.file_name);
-            let clip_url = format!("{}/clip/{}", settings.public_url, report.clip_id);
-            let ban_url = format!("{}/admin/ban/{}", settings.public_url, new_token);
-            let remove_url = format!("{}/admin/remove/{}", settings.public_url, new_token);
-            let reporter_ip = req
-                .connection_info()
-                .realip_remote_addr()
-                .unwrap_or("unknown")
-                .to_string();
-            log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
+        if settings.discord_notifications.unwrap_or(false) {
+            if let Some(url) = &settings.discord_webhook_url {
+                if let Some(user_id) = &settings.discord_userid {
+                    let display_name = sanitize_display_name(&report.file_name);
+                    let clip_url = format!("{}/clip/{}", settings.backend_url, report.clip_id);
+                    let ban_url = format!("{}/admin/ban/{}", settings.backend_url, new_token);
+                    let remove_url = format!("{}/admin/remove/{}", settings.backend_url, new_token);
+                    let reporter_ip = req
+                        .connection_info()
+                        .realip_remote_addr()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    log!([DEBUG] => "Sending Discord report notification for clip {} from IP {}", report.clip_id, reporter_ip);
 
-            let message = serde_json::json!({
-                "content": "🚨 New Clip Report! <@564472732071493633>",
-                "embeds": [{
-                    "title": "Reported Clip Details",
-                    "color": 15158332,
-                    "fields": [
-                        {
-                            "name": "Uploader",
-                            "value": format!("{} (`{}`)", report.username, report.user_id),
-                            "inline": true
-                        },
-                        {
-                            "name": "Reporter IP",
-                            "value": reporter_ip,
-                            "inline": true
-                        },
-                        {
-                            "name": "File Name",
-                            "value": display_name,
-                            "inline": false
-                        },
-                        {
-                            "name": "Actions",
-                            "value": format!(
-                                "🔗 [View Clip]({})\n🔨 [Ban User & IP]({})\n🗑️ [Remove Video]({})",
-                                clip_url, ban_url, remove_url
-                            )
+                    let message = serde_json::json!({
+                        "content": format!("🚨 New Clip Report! <@{}>", user_id),
+                        "embeds": [{
+                            "title": "Reported Clip Details",
+                            "color": 15158332,
+                            "fields": [
+                                {
+                                    "name": "Uploader",
+                                    "value": format!("{} (`{}`)", report.username, report.user_id),
+                                    "inline": true
+                                },
+                                {
+                                    "name": "Reporter IP",
+                                    "value": reporter_ip,
+                                    "inline": true
+                                },
+                                {
+                                    "name": "File Name",
+                                    "value": display_name,
+                                    "inline": false
+                                },
+                                {
+                                    "name": "Actions",
+                                    "value": format!(
+                                        "🔗 [View Clip]({})\n🔨 [Ban User]({})\n🗑️ [Remove Video]({})",
+                                        clip_url, ban_url, remove_url
+                                    )
+                                }
+                            ]
+                        }]
+                    });
+
+                    let client = reqwest::Client::new();
+                    let response = client.post(url).json(&message).send().await;
+
+                    match response {
+                        Ok(res) => {
+                            if !res.status().is_success() {
+                                let status = res.status();
+                                let error_body = res
+                                    .text()
+                                    .await
+                                    .unwrap_or_else(|_| "Could not read response body".to_string());
+                                log!([DEBUG] => "ERROR: Discord webhook failed. Status: {}. Body: {}", status, error_body);
+                            } else {
+                                log!([DEBUG] => "Successfully sent Discord notification.");
+                            }
                         }
-                    ]
-                }]
-            });
-
-            let client = reqwest::Client::new();
-            let response = client.post(url).json(&message).send().await;
-
-            match response {
-                Ok(res) => {
-                    if !res.status().is_success() {
-                        let status = res.status();
-                        let error_body = res
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Could not read response body".to_string());
-                        log!([DEBUG] => "ERROR: Discord webhook failed. Status: {}. Body: {}", status, error_body);
-                    } else {
-                        log!([DEBUG] => "Successfully sent Discord notification.");
+                        Err(e) => {
+                            log!([DEBUG] => "ERROR: Failed to send Discord notification request: {}", e);
+                        }
                     }
-                }
-                Err(e) => {
-                    log!([DEBUG] => "ERROR: Failed to send Discord notification request: {}", e);
                 }
             }
         }
@@ -553,18 +564,20 @@ pub async fn serve_clip_oembed(
     };
 
     let display_name = sanitize_display_name(&clip_details.file_name);
-    let raw_url = format!("{}/clip/{}/raw", settings.public_url, clip_details.id);
-    let uploader_avatar = clip_details
-        .avatar_url
-        .clone()
-        .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string());
+    let raw_url = format!("{}/clip/{}/raw", settings.backend_url, clip_details.id);
+    let uploader_avatar = clip_details.avatar_url.clone().unwrap_or_else(|| {
+        settings
+            .default_avatar_url
+            .clone()
+            .unwrap_or_else(|| "https://avatars.githubusercontent.com/u/1024025?v=4".to_string())
+    });
 
     let oembed_response = serde_json::json!({
         "version": "1.0",
         "type": "video",
         "author_name": clip_details.username,
-        "provider_name": "Wayclip",
-        "provider_url": settings.public_url,
+        "provider_name": settings.app_name,
+        "provider_url": settings.backend_url,
         "thumbnail_url": uploader_avatar,
         "thumbnail_width": 128,
         "thumbnail_height": 128,
@@ -577,4 +590,16 @@ pub async fn serve_clip_oembed(
     });
 
     HttpResponse::Ok().json(oembed_response)
+}
+
+#[get("/get-app-info")]
+pub async fn get_app_info(state: web::Data<AppState>) -> impl Responder {
+    let settings = state.settings.clone();
+    HttpResponse::Ok().json(json!({
+        "backend_url": settings.backend_url,
+        "frontend_url": settings.frontend_url,
+        "app_name": settings.app_name,
+        "default_avatar_url": settings.default_avatar_url,
+        "upload_limit_bytes": settings.upload_limit_bytes
+    }))
 }

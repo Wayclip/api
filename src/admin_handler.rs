@@ -1,69 +1,14 @@
+use crate::models::{
+    AdminDashboardData, FullUserDetails, ReportedClipInfo, UpdateRolePayload, UpdateTierPayload,
+    UserAdminInfo,
+};
 use crate::AppState;
 use actix_web::{delete, get, post, web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use serde::Serialize;
 use serde_json::json;
 use sqlx::types::chrono::Utc;
 use uuid::Uuid;
 use wayclip_core::log;
-use wayclip_core::models::{HostedClipInfo, SubscriptionTier, UserRole};
-
-#[derive(Serialize, sqlx::FromRow)]
-struct UserAdminInfo {
-    id: Uuid,
-    username: String,
-    email: Option<String>,
-    tier: SubscriptionTier,
-    is_banned: bool,
-    role: UserRole,
-    clip_count: i64,
-    data_used: i64,
-}
-
-#[derive(Serialize, sqlx::FromRow)]
-struct ReportedClipInfo {
-    clip_id: Uuid,
-    file_name: String,
-    file_size: i64,
-    uploader_username: String,
-    report_token: Uuid,
-}
-
-#[derive(serde::Deserialize)]
-pub struct UpdateRolePayload {
-    role: UserRole,
-}
-
-#[derive(serde::Deserialize)]
-pub struct UpdateTierPayload {
-    tier: SubscriptionTier,
-}
-
-#[derive(Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct FullUserDetails {
-    id: Uuid,
-    username: String,
-    email: Option<String>,
-    avatar_url: Option<String>,
-    tier: SubscriptionTier,
-    role: UserRole,
-    is_banned: bool,
-    created_at: chrono::DateTime<chrono::Utc>,
-    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
-    two_factor_enabled: bool,
-    subscription_status: Option<String>,
-    current_period_end: Option<chrono::DateTime<chrono::Utc>>,
-    #[sqlx(json)]
-    connected_providers: serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct AdminDashboardData {
-    users: Vec<UserAdminInfo>,
-    reported_clips: Vec<ReportedClipInfo>,
-    total_data_usage: i64,
-}
+use wayclip_core::models::HostedClipInfo;
 
 async fn validate_and_use_token(
     token: Uuid,
@@ -208,15 +153,13 @@ async fn get_admin_dashboard(data: web::Data<AppState>) -> impl Responder {
         r#"
         SELECT
             u.id, u.username, u.email,
-            u.tier as "tier: _",
+            u.tier,
             u.is_banned,
             u.role as "role: _",
-            -- CHANGE: Cast aggregate results to BIGINT for proper mapping to i64
             COALESCE(c.clip_count, 0)::BIGINT as "clip_count!",
             COALESCE(c.total_size, 0)::BIGINT as "data_used!"
         FROM users u
         LEFT JOIN (
-            -- CHANGE: Cast aggregate results to BIGINT
             SELECT user_id, COUNT(*)::BIGINT as clip_count, SUM(file_size)::BIGINT as total_size
             FROM clips GROUP BY user_id
         ) c ON u.id = c.user_id
@@ -250,7 +193,6 @@ async fn get_admin_dashboard(data: web::Data<AppState>) -> impl Responder {
             HttpResponse::Ok().json(AdminDashboardData {
                 users,
                 reported_clips,
-                // FIX: Use `unwrap_or(0)` to handle the Option<i64> correctly.
                 total_data_usage: total_usage.unwrap_or(0),
             })
         }
@@ -298,10 +240,10 @@ async fn update_user_tier(
     data: web::Data<AppState>,
 ) -> impl Responder {
     let target_user_id = *path;
-    log!([DEBUG] => "Admin manually setting tier for user {} to {:?}", target_user_id, payload.tier);
+    log!([DEBUG] => "Admin manually setting tier for user {} to {}", target_user_id, payload.tier);
 
     match sqlx::query("UPDATE users SET tier = $1 WHERE id = $2")
-        .bind(payload.tier)
+        .bind(&payload.tier)
         .bind(target_user_id)
         .execute(&data.db_pool)
         .await
@@ -506,7 +448,7 @@ async fn get_user_details(path: web::Path<Uuid>, data: web::Data<AppState>) -> i
             u.username,
             u.email,
             u.avatar_url,
-            u.tier as "tier: _",
+            u.tier,
             u.role as "role: _",
             u.is_banned,
             u.created_at,
