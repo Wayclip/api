@@ -31,7 +31,6 @@ jobs:
           sudo rm -rf /usr/local/share/chromium
           sudo docker image prune -a -f
 
-
       - name: Get short SHA
         id: vars
         run: echo "SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
@@ -51,8 +50,11 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx
+      - name: Set up Buildx (REMOTE BUILDER)
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: cloud
+          endpoint: auto
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
