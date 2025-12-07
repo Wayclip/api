@@ -91,7 +91,9 @@ ENV SQLX_OFFLINE=true
 RUN export RUSTTARGET=$(cat /rust_target) && \
     if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
         export CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc" && \
-        export PKG_CONFIG="aarch64-linux-gnu-pkg-config"; \
+        export PKG_CONFIG="pkg-config" && \
+        export PKG_CONFIG_ALLOW_CROSS=1 && \
+        export PKG_CONFIG_LIBDIR="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"; \
     fi && \
     cargo build --release --target $RUSTTARGET
 
