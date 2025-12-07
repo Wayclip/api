@@ -47,9 +47,9 @@ if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
         rm -rf /var/lib/apt/lists/* && \
         rustup target add aarch64-unknown-linux-gnu && \
         mkdir -p .cargo && \
-        echo '[target.aarch64-unknown-linux-gnu]' >> . cargo/config.toml && \
+        echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml && \
         echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml && \
-        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> .cargo/config. toml; \
+        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> .cargo/config.toml; \
     else \
         apt-get update && \
         apt-get install -y --no-install-recommends \
@@ -99,7 +99,7 @@ RUN export RUSTTARGET=$(cat /rust_target) && \
 RUN mkdir /out && \
     cp target/$(cat /rust_target)/release/wayclip-api /out/
 
-FROM debian:bookworm-slim
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 libpq5 libssh2-1 ffmpeg \
