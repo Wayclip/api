@@ -43,14 +43,13 @@ if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
             libxrandr-dev:arm64 \
             libxtst-dev:arm64 \
             libasound2-dev:arm64 \
-            pkg-config-aarch64-linux-gnu \
             lld && \
         rm -rf /var/lib/apt/lists/* && \
         rustup target add aarch64-unknown-linux-gnu && \
         mkdir -p .cargo && \
-        echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml && \
+        echo '[target.aarch64-unknown-linux-gnu]' >> . cargo/config.toml && \
         echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml && \
-        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> .cargo/config.toml; \
+        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> .cargo/config. toml; \
     else \
         apt-get update && \
         apt-get install -y --no-install-recommends \
