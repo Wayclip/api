@@ -103,7 +103,7 @@ FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 libpq5 libssh2-1 ffmpeg \
-    libwayland-client0 libxkbcommon0 libpipewire-0. 3-0 libdbus-1-3 \
+    libwayland-client0 libxkbcommon0 libpipewire-0.3-0 libdbus-1-3 \
     libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
     libx11-6 libxrandr2 libxtst6 libasound2 \
     && rm -rf /var/lib/apt/lists/*
