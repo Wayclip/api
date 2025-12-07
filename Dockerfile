@@ -46,10 +46,10 @@ if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
             lld && \
         rm -rf /var/lib/apt/lists/* && \
         rustup target add aarch64-unknown-linux-gnu && \
-        mkdir -p .cargo && \
-        echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml && \
-        echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml && \
-        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> .cargo/config.toml; \
+        mkdir -p /app/.cargo && \
+        echo '[target.aarch64-unknown-linux-gnu]' >> /app/.cargo/config.toml && \
+        echo 'linker = "aarch64-linux-gnu-gcc"' >> /app/.cargo/config.toml && \
+        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> /app/.cargo/config.toml; \
     else \
         apt-get update && \
         apt-get install -y --no-install-recommends \
@@ -103,7 +103,7 @@ FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 libpq5 libssh2-1 ffmpeg \
-    libwayland-client0 libxkbcommon0 libpipewire-0.3-0 libdbus-1-3 \
+    libwayland-client0 libxkbcommon0 libpipewire-0. 3-0 libdbus-1-3 \
     libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
     libx11-6 libxrandr2 libxtst6 libasound2 \
     && rm -rf /var/lib/apt/lists/*
