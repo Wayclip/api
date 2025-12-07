@@ -18,7 +18,7 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 RUN export RUSTTARGET=$(cat /rust_target) && \
-    if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
+if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
         dpkg --add-architecture arm64 && \
         apt-get update && \
         apt-get install -y --no-install-recommends \
@@ -42,7 +42,9 @@ RUN export RUSTTARGET=$(cat /rust_target) && \
             libx11-dev:arm64 \
             libxrandr-dev:arm64 \
             libxtst-dev:arm64 \
-            libasound2-dev:arm64 && \
+            libasound2-dev:arm64 \
+            pkg-config-aarch64-linux-gnu \
+            lld && \
         rm -rf /var/lib/apt/lists/* && \
         rustup target add aarch64-unknown-linux-gnu && \
         mkdir -p .cargo && \
