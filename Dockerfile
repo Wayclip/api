@@ -22,34 +22,39 @@ if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
         dpkg --add-architecture arm64 && \
         apt-get update && \
         apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
-            libssl-dev:arm64 \
-            libpq-dev:arm64 \
-            libssh2-1-dev:arm64 \
-            libavcodec-dev:arm64 \
-            libavformat-dev:arm64 \
-            libavutil-dev:arm64 \
-            libswscale-dev:arm64 \
-            libavfilter-dev:arm64 \
-            libavdevice-dev:arm64 \
-            libswresample-dev:arm64 \
-            libwayland-dev:arm64 \
-            libxkbcommon-dev:arm64 \
-            libpipewire-0.3-dev:arm64 \
-            libdbus-1-dev:arm64 \
-            libgstreamer1.0-dev:arm64 \
-            libgstreamer-plugins-base1.0-dev:arm64 \
-            libx11-dev:arm64 \
-            libxrandr-dev:arm64 \
-            libxtst-dev:arm64 \
-            libasound2-dev:arm64 \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
+            libssl-dev libssl-dev:arm64 \
+            libpq-dev libpq-dev:arm64 \
+            libssh2-1-dev libssh2-1-dev:arm64 \
+            libavcodec-dev libavcodec-dev:arm64 \
+            libavformat-dev libavformat-dev:arm64 \
+            libavutil-dev libavutil-dev:arm64 \
+            libswscale-dev libswscale-dev:arm64 \
+            libavfilter-dev libavfilter-dev:arm64 \
+            libavdevice-dev libavdevice-dev:arm64 \
+            libswresample-dev libswresample-dev:arm64 \
+            libwayland-dev libwayland-dev:arm64 \
+            libxkbcommon-dev libxkbcommon-dev:arm64 \
+            libpipewire-0.3-dev libpipewire-0.3-dev:arm64 \
+            libdbus-1-dev libdbus-1-dev:arm64 \
+            libgstreamer1.0-dev libgstreamer1.0-dev:arm64 \
+            libgstreamer-plugins-base1.0-dev libgstreamer-plugins-base1.0-dev:arm64 \
+            libx11-dev libx11-dev:arm64 \
+            libxrandr-dev libxrandr-dev:arm64 \
+            libxtst-dev libxtst-dev:arm64 \
+            libasound2-dev libasound2-dev:arm64 \
             lld && \
         rm -rf /var/lib/apt/lists/* && \
         rustup target add aarch64-unknown-linux-gnu && \
         mkdir -p /app/.cargo && \
         echo '[target.aarch64-unknown-linux-gnu]' >> /app/.cargo/config.toml && \
         echo 'linker = "aarch64-linux-gnu-gcc"' >> /app/.cargo/config.toml && \
-        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> /app/.cargo/config.toml; \
+        echo 'ar = "aarch64-linux-gnu-ar"' >> /app/.cargo/config.toml && \
+        echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> /app/.cargo/config.toml && \
+        echo '#!/bin/sh' > /usr/bin/aarch64-unknown-linux-gnu-pkg-config && \
+        echo 'PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \' >> /usr/bin/aarch64-unknown-linux-gnu-pkg-config && \
+        echo 'exec pkg-config "$@"' >> /usr/bin/aarch64-unknown-linux-gnu-pkg-config && \
+        chmod +x /usr/bin/aarch64-unknown-linux-gnu-pkg-config; \
     else \
         apt-get update && \
         apt-get install -y --no-install-recommends \
@@ -90,9 +95,7 @@ ENV SQLX_OFFLINE=true
 RUN export RUSTTARGET=$(cat /rust_target) && \
     if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
         export CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc" && \
-        export PKG_CONFIG="pkg-config" && \
-        export PKG_CONFIG_ALLOW_CROSS=1 && \
-        export PKG_CONFIG_LIBDIR="/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"; \
+        export CXX_aarch64_unknown_linux_gnu="aarch64-linux-gnu-g++"; \
     fi && \
     cargo build --release --target $RUSTTARGET
 
