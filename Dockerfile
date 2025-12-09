@@ -46,9 +46,9 @@ if [ "$RUSTTARGET" = "aarch64-unknown-linux-gnu" ]; then \
             lld && \
         rm -rf /var/lib/apt/lists/* && \
         rustup target add aarch64-unknown-linux-gnu && \
-        mkdir -p /app/. cargo && \
-        echo '[target.aarch64-unknown-linux-gnu]' >> /app/. cargo/config.toml && \
-        echo 'linker = "aarch64-linux-gnu-gcc"' >> /app/. cargo/config.toml && \
+        mkdir -p /app/.cargo && \
+        echo '[target.aarch64-unknown-linux-gnu]' >> /app/.cargo/config.toml && \
+        echo 'linker = "aarch64-linux-gnu-gcc"' >> /app/.cargo/config.toml && \
         echo 'ar = "aarch64-linux-gnu-ar"' >> /app/.cargo/config.toml && \
         echo 'rustflags = ["-C", "link-arg=-fuse-ld=lld"]' >> /app/.cargo/config.toml && \
         echo '#!/bin/sh' > /usr/bin/aarch64-unknown-linux-gnu-pkg-config && \
