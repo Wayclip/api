@@ -1,4 +1,4 @@
-use crate::{settings::Settings, AppState};
+use crate::AppState;
 use actix_multipart::Multipart;
 use actix_web::http::header::{self, ContentType};
 use actix_web::{delete, get, post, web, Error, HttpMessage, HttpRequest, HttpResponse, Responder};
@@ -54,7 +54,7 @@ pub async fn share_clip_begin(
     let tier_limit = data
         .tiers
         .get(&user.tier)
-        .map(|t| t.max_storage_bytes as i64)
+        .map(|t| t.max_storage_bytes)
         .unwrap_or(0);
     let current_usage: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
@@ -186,8 +186,8 @@ pub async fn serve_clip(
     req: HttpRequest,
     id: web::Path<Uuid>,
     data: web::Data<AppState>,
-    settings: web::Data<Settings>,
 ) -> impl Responder {
+    let settings = data.settings.clone();
     log!([DEBUG] => "Serving clip page for ID: {}", *id);
 
     let clip_details = match sqlx::query_as!(
@@ -338,8 +338,8 @@ pub async fn report_clip(
     req: HttpRequest,
     id: web::Path<Uuid>,
     data: web::Data<AppState>,
-    settings: web::Data<Settings>,
 ) -> impl Responder {
+    let settings = data.settings.clone();
     log!([DEBUG] => "Received report for clip ID: {}", *id);
     let report_data = sqlx::query!(
         r#"
@@ -536,11 +536,8 @@ pub async fn delete_clip(
 }
 
 #[get("/clip/{id}/meta")]
-pub async fn serve_clip_oembed(
-    id: web::Path<Uuid>,
-    data: web::Data<AppState>,
-    settings: web::Data<Settings>,
-) -> impl Responder {
+pub async fn serve_clip_oembed(id: web::Path<Uuid>, data: web::Data<AppState>) -> impl Responder {
+    let settings = data.settings.clone();
     let clip_details = match sqlx::query_as!(
         ClipDetails,
         r#"
