@@ -14,6 +14,7 @@ pub struct Mailer {
 impl Mailer {
     pub fn new(config: &Settings) -> Self {
         let smtp_host = config.smtp_host.clone().expect("No host provided");
+        let smtp_port = config.smtp_port.unwrap_or(587);
         let smtp_user = config.smtp_user.clone().expect("No user provided");
         let smtp_pass = config.smtp_password.clone().expect("No password provided");
         let from_address = config
@@ -24,7 +25,8 @@ impl Mailer {
         let creds = Credentials::new(smtp_user, smtp_pass);
 
         let mailer = SmtpTransport::relay(&smtp_host)
-            .unwrap()
+            .expect("Failed to build SMTP transport")
+            .port(smtp_port)
             .credentials(creds)
             .build();
 
