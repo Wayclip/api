@@ -326,7 +326,11 @@ async fn github_login(
         .clone()
         .unwrap_or_else(|| settings.frontend_url.clone());
 
-    let validated_redirect_uri = if allowed_uris.contains(&final_redirect_str) {
+    let is_cli_localhost = client_type == "cli"
+        && (final_redirect_str.starts_with("http://127.0.0.1")
+            || final_redirect_str.starts_with("http://localhost"));
+
+    let validated_redirect_uri = if allowed_uris.contains(&final_redirect_str) || is_cli_localhost {
         final_redirect_str
     } else {
         log!([AUTH] => "Invalid redirect_uri specified: {}", final_redirect_str);
@@ -465,7 +469,11 @@ async fn google_login(
         .clone()
         .unwrap_or_else(|| settings.frontend_url.clone());
 
-    let validated_redirect_uri = if allowed_uris.contains(&final_redirect_str) {
+    let is_cli_localhost = client_type == "cli"
+        && (final_redirect_str.starts_with("http://127.0.0.1")
+            || final_redirect_str.starts_with("http://localhost"));
+
+    let validated_redirect_uri = if allowed_uris.contains(&final_redirect_str) || is_cli_localhost {
         final_redirect_str
     } else {
         log!([AUTH] => "Invalid redirect_uri specified: {}", final_redirect_str);
@@ -592,7 +600,11 @@ async fn discord_login(
         .clone()
         .unwrap_or_else(|| settings.frontend_url.clone());
 
-    let validated_redirect_uri = if allowed_uris.contains(&final_redirect_str) {
+    let is_cli_localhost = client_type == "cli"
+        && (final_redirect_str.starts_with("http://127.0.0.1")
+            || final_redirect_str.starts_with("http://localhost"));
+
+    let validated_redirect_uri = if allowed_uris.contains(&final_redirect_str) || is_cli_localhost {
         final_redirect_str
     } else {
         log!([AUTH] => "Invalid redirect_uri specified: {}", final_redirect_str);
@@ -1415,7 +1427,7 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
     let storage_limit = data
         .tiers
         .get(&user.tier)
-        .map(|t| t.max_storage_bytes as i64)
+        .map(|t| t.max_storage_bytes)
         .unwrap_or(0);
 
     let profile = UserProfile {

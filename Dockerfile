@@ -27,6 +27,8 @@ RUN apt-get update && \
         libasound2-dev && \
     rm -rf /var/lib/apt/lists/*
 
+RUN cargo install sqlx-cli --no-default-features --features postgres
+
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs
 RUN cargo fetch
@@ -55,6 +57,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /usr/src/app
 
 COPY --from=builder /out/wayclip-api /usr/local/bin/
+COPY --from=builder /usr/local/cargo/bin/sqlx /usr/local/bin/
 COPY --from=builder /app/assets ./assets
 COPY --from=builder /app/migrations ./migrations
+
 ENTRYPOINT ["/usr/local/bin/wayclip-api"]
