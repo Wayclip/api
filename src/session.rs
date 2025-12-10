@@ -1,5 +1,6 @@
 use actix_web::HttpRequest;
 use sqlx::PgPool;
+use std::sync::OnceLock;
 use uaparser::{Parser, UserAgentParser};
 use uuid::Uuid;
 
@@ -21,9 +22,19 @@ pub fn get_user_agent(req: &HttpRequest) -> String {
         .to_string()
 }
 
+static UA_PARSER: OnceLock<UserAgentParser> = OnceLock::new();
+
 pub fn parse_user_agent(user_agent_string: &str) -> String {
-    let ua_parser =
-        UserAgentParser::from_yaml("../assets/regexes.yaml").expect("Failed to create parser");
+    let ua_parser = UA_PARSER.get_or_init(|| {
+        let path = if std::path::Path::new("assets/regexes.yaml").exists() {
+            "assets/regexes.yaml"
+        } else {
+            "../assets/regexes.yaml"
+        };
+
+        UserAgentParser::from_yaml(path).expect("Failed to load assets/regexes.yaml")
+    });
+
     let client = ua_parser.parse(user_agent_string);
 
     if client.os.family == "Other"
