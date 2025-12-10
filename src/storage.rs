@@ -202,6 +202,7 @@ impl Storage for LocalStorage {
 
 pub struct SftpStorage {
     pool: r2d2::Pool<Ssh2ConnectionManager>,
+    connection_manager: Ssh2ConnectionManager,
     remote_path: String,
 }
 
@@ -228,13 +229,14 @@ impl SftpStorage {
             .max_size(25)
             .min_idle(Some(5))
             .connection_timeout(std::time::Duration::from_secs(10))
-            .build(manager)
+            .build(manager.clone())
             .map_err(|e| anyhow!("Failed to build SFTP connection pool: {}", e))?;
 
         log!([DEBUG] => "SFTP connection pool created successfully.");
 
         Ok(Self {
             pool,
+            connection_manager: manager,
             remote_path: settings
                 .sftp_remote_path
                 .clone()
@@ -338,17 +340,24 @@ impl Storage for SftpStorage {
 
         let content_range = format!("bytes {start}-{end}/{total_size}");
 
-        let pool = self.pool.clone();
+        let connection_manager = self.connection_manager.clone();
         let (tx, rx) = mpsc::channel(4);
 
         task::spawn_blocking(move || {
             let result: Result<()> = (|| {
-                let conn = pool.get()?;
-                let sftp = conn.sftp()?;
+                log!([DEBUG] => "SFTP STREAM: Opening fresh connection for stream...");
+                let conn = connection_manager
+                    .connect()
+                    .map_err(|e| std::io::Error::other(format!("SFTP Connect failed: {}", e)))?;
+
+                let sftp = conn.sftp().map_err(|e| {
+                    std::io::Error::other(format!("SFTP Session Init failed: {}", e))
+                })?;
+
                 let mut remote_file = sftp.open(Path::new(&remote_file_path_str))?;
                 remote_file.seek(SeekFrom::Start(start))?;
 
-                let mut buffer = vec![0; 1024 * 512];
+                let mut buffer = vec![0; 1024 * 64];
                 let mut bytes_left_to_read = read_len;
 
                 while bytes_left_to_read > 0 {
