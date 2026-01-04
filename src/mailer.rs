@@ -1,5 +1,5 @@
 use crate::settings::Settings;
-use lettre::message::header::ContentType;
+use lettre::message::SinglePart;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use std::fs;
@@ -82,8 +82,7 @@ impl Mailer {
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
             .subject(subject)
-            .header(ContentType::TEXT_HTML)
-            .body(html_body)
+            .singlepart(SinglePart::html(html_body))
             .unwrap();
 
         self.mailer.send(&email)?;
@@ -122,8 +121,7 @@ impl Mailer {
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
             .subject(subject)
-            .header(ContentType::TEXT_HTML)
-            .body(html_body)
+            .singlepart(SinglePart::html(html_body))
             .unwrap();
 
         self.mailer.send(&email)?;
@@ -164,8 +162,7 @@ impl Mailer {
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
             .subject(subject)
-            .header(ContentType::TEXT_HTML)
-            .body(html_body)
+            .singlepart(SinglePart::html(html_body))
             .unwrap();
 
         self.mailer.send(&email)?;
