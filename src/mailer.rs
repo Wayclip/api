@@ -186,11 +186,8 @@ impl Mailer {
         let email = Message::builder()
             .from(self.from_address.parse().unwrap())
             .to(to.parse().unwrap())
-            .subject(subject.clone())
-            .multipart(MultiPart::alternative_plain_html(
-                body_text.clone(), // plain text
-                html_body.clone(), // html
-            ))
+            .subject(subject)
+            .singlepart(SinglePart::html(html_body))
             .unwrap();
 
         self.mailer.send(&email)?;
