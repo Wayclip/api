@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO plans (name, max_storage_bytes, stripe_price_id, display_price, description)\n            VALUES ($1, $2, $3, $4, $5)\n            ON CONFLICT (name) DO UPDATE SET\n                max_storage_bytes = EXCLUDED.max_storage_bytes,\n                stripe_price_id = EXCLUDED.stripe_price_id,\n                description = EXCLUDED.description\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "85a3bdbe0bc5f34095d352735a22c046e699b25458bee7a3b197a8cd6e5ee29f"
+}

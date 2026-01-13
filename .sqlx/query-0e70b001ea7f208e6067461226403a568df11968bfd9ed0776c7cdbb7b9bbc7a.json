@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE subscriptions\n        SET status = 'canceled',\n            canceled_at = $1,\n            updated_at = NOW()\n        WHERE stripe_subscription_id = $2\n        RETURNING user_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0e70b001ea7f208e6067461226403a568df11968bfd9ed0776c7cdbb7b9bbc7a"
+}

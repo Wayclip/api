@@ -1,0 +1,110 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            u.id,\n            u.username,\n            u.email,\n            u.avatar_url,\n            u.tier,\n            u.role as \"role: _\",\n            u.is_banned,\n            u.created_at,\n            u.deleted_at,\n            u.email_verified_at,\n            u.two_factor_enabled,\n            s.status::TEXT as \"subscription_status?\",\n            s.current_period_end as \"current_period_end?\",\n            (\n                SELECT COALESCE(json_agg(provider), '[]'::json)\n                FROM user_credentials\n                WHERE user_id = u.id\n            ) as \"connected_providers!\"\n        FROM\n            users u\n        LEFT JOIN\n            subscriptions s ON u.id = s.user_id\n        WHERE\n            u.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "tier",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "role: _",
+        "type_info": {
+          "Custom": {
+            "name": "user_role",
+            "kind": {
+              "Enum": [
+                "user",
+                "admin"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "is_banned",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "deleted_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "email_verified_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "two_factor_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "subscription_status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "current_period_end?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "connected_providers!",
+        "type_info": "Json"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      null,
+      false,
+      null
+    ]
+  },
+  "hash": "7670ba8096d33aebb584ecaec8b2cf2a5a272add49ad494695fb3cc55cc6e821"
+}
