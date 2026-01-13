@@ -57,6 +57,7 @@ pnpm-debug.log*
 # Environment
 .env
 .env*.local
+.env*.prod
 
 # Next.js
 .next/

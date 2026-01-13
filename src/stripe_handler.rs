@@ -20,7 +20,7 @@ fn tier_from_price_id(
     tiers
         .values()
         .find(|t| t.stripe_price_id.as_deref() == Some(price_id))
-        .map(|t| t.name.clone())
+        .map(|t| t.name.to_lowercase())
 }
 
 #[post("/checkout/{tier}")]
@@ -436,12 +436,12 @@ async fn handle_subscription_updated(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    let tier_name = tier_from_price_id(&price_id, &state.tiers).unwrap_or("Free".to_string());
+    let tier_name = tier_from_price_id(&price_id, &state.tiers).unwrap_or("free".to_string());
 
     let final_tier_name = if status == SubscriptionStatus::Active {
-        tier_name
+        tier_name.to_lowercase()
     } else {
-        "Free".to_string()
+        "free".to_string()
     };
 
     let (start_date, end_date) = (
@@ -527,7 +527,7 @@ async fn handle_subscription_deleted(state: &web::Data<AppState>, sub: StripeSub
         }
     };
 
-    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'Free' WHERE id = $1", user_id)
+    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'free' WHERE id = $1", user_id)
         .execute(&state.db_pool)
         .await
     {
@@ -589,7 +589,7 @@ async fn handle_charge_dispute_created(
         }
     };
 
-    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'Free' WHERE id = $1", user_id)
+    if let Err(e) = sqlx::query!("UPDATE users SET tier = 'free' WHERE id = $1", user_id)
         .execute(&state.db_pool)
         .await
     {

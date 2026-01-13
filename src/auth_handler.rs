@@ -97,31 +97,31 @@ fn build_auth_cookie(
     let config = Settings::new().expect("Failed to load settings");
     let frontend_url = &config.frontend_url;
 
+    let is_localhost = frontend_url.contains("localhost") || frontend_url.contains("127.0.0.1");
+
     let mut cookie_builder = Cookie::build(name.to_owned(), value.to_owned())
         .path("/")
-        .secure(true)
-        .http_only(true)
-        .same_site(SameSite::None);
+        .http_only(true);
 
-    let root_domain = Url::parse(frontend_url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(|host| host.to_string()))
-        .and_then(|host| {
-            let parts: Vec<&str> = host.split('.').collect();
-            if parts.len() >= 2 {
-                if parts.len() >= 3 {
+    if is_localhost {
+        cookie_builder = cookie_builder.secure(false).same_site(SameSite::Lax);
+    } else {
+        cookie_builder = cookie_builder.secure(true).same_site(SameSite::None);
+    }
+
+    if !is_localhost {
+        let root_domain = Url::parse(frontend_url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(|host| host.to_string()))
+            .and_then(|host| {
+                let parts: Vec<&str> = host.split('.').collect();
+                if parts.len() >= 2 {
                     Some(format!(".{}", parts[parts.len() - 2..].join(".")))
-                } else if parts.len() == 2 && !parts[0].contains("localhost") {
-                    Some(format!(".{host}"))
                 } else {
                     None
                 }
-            } else {
-                None
-            }
-        });
+            });
 
-    if !frontend_url.contains("localhost") {
         if let Some(domain) = root_domain {
             cookie_builder = cookie_builder.domain(domain);
         }
@@ -262,6 +262,7 @@ async fn finalize_login(
     final_redirect_str: &str,
     data: &web::Data<AppState>,
     req: &HttpRequest,
+    is_json_requested: bool,
 ) -> HttpResponse {
     let settings = data.settings.clone();
 
@@ -292,16 +293,27 @@ async fn finalize_login(
     let session_token =
         record_successful_login(&data.db_pool, &user, req, data.mailer.as_ref()).await;
 
+    let token_to_send = match jwt::create_jwt(user.id, &user.security_stamp, false) {
+        Ok(t) => t,
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+
+    let auth_cookie = build_auth_cookie("session_token", &session_token, None);
+
     if client_type == "cli" {
-        let deep_link = format!("{final_redirect_str}?token={session_token}");
+        let deep_link = format!("{final_redirect_str}?token={token_to_send}");
         HttpResponse::Found()
             .append_header((LOCATION, deep_link))
             .finish()
-    } else {
-        let auth_cookie = build_auth_cookie("session_token", &session_token, None);
+    } else if is_json_requested {
         HttpResponse::Ok()
             .cookie(auth_cookie)
-            .json(serde_json::json!({ "success": true }))
+            .json(json!({ "success": true, "message": "Logged in successfully" }))
+    } else {
+        HttpResponse::Found()
+            .append_header((LOCATION, final_redirect_str.to_string()))
+            .cookie(auth_cookie)
+            .finish()
     }
 }
 
@@ -450,7 +462,8 @@ async fn github_callback(
                 .json(json!({ "message": "Database error" }));
         }
     };
-    finalize_login(user, client_type, redirect, &data, &req).await
+
+    finalize_login(user, client_type, redirect, &data, &req, false).await
 }
 
 #[get("/google")]
@@ -581,7 +594,7 @@ async fn google_callback(
                 .json(json!({ "message": "Database error" }));
         }
     };
-    finalize_login(user, client_type, redirect, &data, &req).await
+    finalize_login(user, client_type, redirect, &data, &req, false).await
 }
 
 #[get("/discord")]
@@ -726,7 +739,7 @@ async fn discord_callback(
                 .json(json!({ "message": "Database error" }));
         }
     };
-    finalize_login(user, client_type, redirect, &data, &req).await
+    finalize_login(user, client_type, redirect, &data, &req, false).await
 }
 
 #[post("/register")]
@@ -1032,7 +1045,7 @@ async fn login_with_password(
         return HttpResponse::Unauthorized().json(json!({ "message": "Invalid credentials." }));
     }
 
-    finalize_login(user, "web", "/", &data, &req).await
+    finalize_login(user, "web", "/", &data, &req, true).await
 }
 
 #[post("/forgot-password")]
@@ -1426,7 +1439,7 @@ pub async fn get_me(req: HttpRequest) -> impl Responder {
 
     let storage_limit = data
         .tiers
-        .get(&user.tier)
+        .get(&user.tier.to_lowercase())
         .map(|t| t.max_storage_bytes)
         .unwrap_or(0);
 
@@ -1658,7 +1671,7 @@ pub async fn get_auth_info(state: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(json!({
         "discord_auth_enabled": settings.discord_auth_enabled,
         "github_auth_enabled": settings.github_auth_enabled,
-        "google_auth_enabled": settings.github_auth_enabled,
+        "google_auth_enabled": settings.google_auth_enabled,
         "email_auth_enabled": settings.email_auth_enabled
     }))
 }

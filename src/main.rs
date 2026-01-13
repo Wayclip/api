@@ -75,84 +75,54 @@ async fn seed_initial_admins(db_pool: &PgPool, settings: &Settings) {
 }
 
 async fn init_plans(pool: &PgPool, settings: &Settings) {
-    let plan_count: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM plans")
-        .fetch_one(pool)
-        .await
-    {
-        Ok(count) => count,
-        Err(e) => {
-            log!([DEBUG] => "Failed to check for existing plans in database: {}", e);
-            return;
-        }
-    };
+    let json_config = settings
+        .tiers_json
+        .clone()
+        .unwrap_or_else(|| "[]".to_string());
+    let tiers_to_insert: Vec<TierConfig> = serde_json::from_str(&json_config).unwrap_or_default();
 
-    if plan_count == 0 {
-        log!([DEBUG] => "No plans found in the database. Initializing from settings...");
-
-        let json_config = settings
-            .tiers_json
-            .clone()
-            .unwrap_or_else(|| "[]".to_string());
-        if json_config == "[]" {
-            log!([DEBUG] => "TIERS_JSON is empty. No plans will be initialized.");
-            return;
-        }
-
-        let tiers_to_insert: Vec<TierConfig> = match serde_json::from_str(&json_config) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                log!([DEBUG]=>
-                    "Failed to parse TIERS_JSON: {e}. Please check the format.",
-                );
-                return;
-            }
-        };
-
-        for tier in tiers_to_insert {
-            let result = sqlx::query(
-                r#"
-                INSERT INTO plans (
-                    name, max_storage_bytes, stripe_price_id, display_price,
-                    display_frequency, description, display_features, is_popular
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                "#,
-            )
-            .bind(&tier.name)
-            .bind(tier.max_storage_bytes as i64)
-            .bind(&tier.stripe_price_id)
-            .bind(&tier.display_price)
-            .bind(&tier.display_frequency)
-            .bind(&tier.description)
-            .bind(&tier.display_features)
-            .bind(&tier.is_popular)
-            .execute(pool)
-            .await;
-
-            match result {
-                Ok(_) => log!([DEBUG] => "Successfully inserted plan: '{}'", tier.name),
-                Err(e) => log!([DEBUG] => "Failed to insert plan '{}': {}", tier.name, e),
-            }
-        }
-    } else {
-        log!([DEBUG] =>
-            "Database already contains {} plans. Skipping initialization.",
-            plan_count
-        );
+    for tier in tiers_to_insert {
+        let name_lower = tier.name.to_lowercase();
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO plans (name, max_storage_bytes, stripe_price_id, display_price, description)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (name) DO UPDATE SET
+                max_storage_bytes = EXCLUDED.max_storage_bytes,
+                stripe_price_id = EXCLUDED.stripe_price_id,
+                description = EXCLUDED.description
+            "#,
+            name_lower,
+            tier.max_storage_bytes as i64,
+            tier.stripe_price_id,
+            tier.display_price,
+            tier.description
+        )
+        .execute(pool)
+        .await;
     }
+    log!([DEBUG] => "Plans synchronized from TIERS_JSON.");
 }
 
 async fn load_tiers_from_db(pool: &PgPool) -> HashMap<String, TierConfig> {
-    sqlx::query_as::<_, TierConfig>("SELECT * FROM plans")
+    match sqlx::query_as::<_, TierConfig>("SELECT * FROM plans")
         .fetch_all(pool)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tier| (tier.name.clone(), tier))
-        .collect()
+    {
+        Ok(tiers) => tiers
+            .into_iter()
+            .map(|tier| (tier.name.to_lowercase(), tier))
+            .collect(),
+        Err(e) => {
+            log!([DEBUG] => "ERROR: Failed to decode tiers from database: {}", e);
+            HashMap::new()
+        }
+    }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenvy::from_filename(".env.local").ok();
     let mut github_oauth_client: Option<BasicClient> = None;
     let mut google_oauth_client: Option<BasicClient> = None;
     let mut discord_oauth_client: Option<BasicClient> = None;
@@ -181,6 +151,11 @@ async fn main() -> std::io::Result<()> {
     log!([DEBUG] => "Tier limits loaded from database.");
 
     seed_initial_admins(&pool, &settings).await;
+
+    for (key, tier) in tiers.iter() {
+        log!([DEBUG] => "Tier key: {}", key);
+        log!([DEBUG] => "{:#?}", tier);
+    }
 
     if settings.github_auth_enabled.is_some() {
         if let (Some(client_id), Some(client_secret)) =

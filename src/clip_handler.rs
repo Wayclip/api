@@ -51,11 +51,15 @@ pub async fn share_clip_begin(
         return Err(actix_web::error::ErrorBadRequest("Invalid file name."));
     }
 
-    let tier_limit = data
-        .tiers
-        .get(&user.tier)
-        .map(|t| t.max_storage_bytes)
-        .unwrap_or(0);
+    let tier_info = data.tiers.get(&user.tier.to_lowercase());
+
+    if tier_info.is_none() {
+        log!([DEBUG] => "WARNING: User {} has unknown tier '{}'. Map keys: {:?}", 
+        user.id, user.tier, data.tiers.keys());
+    }
+
+    let tier_limit = tier_info.map(|t| t.max_storage_bytes).unwrap_or(0);
+
     let current_usage: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size), 0)::BIGINT FROM clips WHERE user_id = $1",
     )

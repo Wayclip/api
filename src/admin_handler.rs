@@ -243,7 +243,7 @@ async fn update_user_tier(
     log!([DEBUG] => "Admin manually setting tier for user {} to {}", target_user_id, payload.tier);
 
     match sqlx::query("UPDATE users SET tier = $1 WHERE id = $2")
-        .bind(&payload.tier)
+        .bind(&payload.tier.to_lowercase())
         .bind(target_user_id)
         .execute(&data.db_pool)
         .await

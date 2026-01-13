@@ -42,6 +42,7 @@ pub struct Settings {
     pub sftp_remote_path: Option<String>,
 
     pub email_auth_enabled: Option<bool>,
+    pub smtp_connect_host: Option<String>,
     pub smtp_host: Option<String>,
     pub smtp_port: Option<u16>,
     pub smtp_user: Option<String>,

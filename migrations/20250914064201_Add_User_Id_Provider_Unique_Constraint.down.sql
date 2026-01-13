@@ -1,2 +1,0 @@
-ALTER TABLE user_credentials
-DROP CONSTRAINT user_credentials_user_id_provider_key;
